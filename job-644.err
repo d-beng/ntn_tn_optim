@@ -1,0 +1,2 @@
+/var/spool/slurm/d/job00644/slurm_script : ligne 96 : 210054 Processus arrêté      python scenario.py
+[2026-06-30T04:18:57.204] error: Detected 1 oom_kill event in StepId=644.batch. Some of the step tasks have been OOM Killed.

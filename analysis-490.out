@@ -1,0 +1,25 @@
+Loaded 11,635,918 rows.
+Filtered to hour 20.0: 0 rows.
+
+Total demand in log: 0.000 Tbps over 0 active users
+
+=== FINAL STATE ===
+
+=== DROP ROOT CAUSE  (0 dropped users, 0.000 Tbps) ===
+
+=== TN_REASON tally (all users) ===
+
+=== NTN_REASON tally (all users) ===
+
+=== SINR DISTRIBUTIONS (served + evaluated users) ===
+  TN  SINR (all evaluated): no SINR values logged
+  TN  SINR (served only) : no SINR values logged
+  NTN SINR (all evaluated): no SINR values logged
+  NTN SINR (served only) : no SINR values logged
+
+=== LOW-SINR USERS by final state ===
+  TN  SINR < -3.0 dB : 0 users
+  NTN SINR < +0.0 dB : 0 users
+
+Saved SINR histograms to sinr_distributions.png
+Done. See the printed breakdown above and drop_analysis.png.
