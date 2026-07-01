@@ -1,0 +1,2 @@
+Time_s,Hour,Total_Demand_Mbps,Served_TN_Mbps,Served_NTN_Mbps,Active_NTN_Beams,Dropped_Traffic_Mbps
+72000,20.0,5744550.09,4253342.29,440315.28,4020,935448.05

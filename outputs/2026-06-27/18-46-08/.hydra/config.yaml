@@ -1,0 +1,220 @@
+constellation:
+  eirp_dbw: 50.0
+  g_t_db: -25.12
+  min_elevation_deg: 25.0
+  apply_j2: true
+  max_spot_beams: 50
+  beam_radius_nadir_km: 120.0
+  max_steering_angle_deg: 45.0
+  freq_ghz: 2.2
+  bandwidth_hz: 300000000
+  beam_quality_weight: 0.3
+  sinr_min_db: 0.0
+  theta_3db_deg: 1.83
+  sll_db: 25.0
+  weather_loss_db: 1.0
+  shells:
+    shell_1:
+      name: Starlink-Shell-1
+      altitude_km: 550.0
+      inclination_deg: 53.0
+      num_planes: 72
+      total_satellites: 1584
+      phasing: 1
+    shell_2:
+      name: Starlink-Shell-2
+      altitude_km: 540.0
+      inclination_deg: 53.2
+      num_planes: 72
+      total_satellites: 1584
+      phasing: 1
+    shell_3:
+      name: Starlink-Shell-3
+      altitude_km: 560.0
+      inclination_deg: 97.6
+      num_planes: 6
+      total_satellites: 348
+      phasing: 1
+    shell_4:
+      name: Starlink-Shell-4
+      altitude_km: 570.0
+      inclination_deg: 70.0
+      num_planes: 36
+      total_satellites: 720
+      phasing: 1
+    shell_5:
+      name: Starlink-Shell-5
+      altitude_km: 560.0
+      inclination_deg: 97.6
+      num_planes: 4
+      total_satellites: 172
+      phasing: 1
+enabled: true
+scenario:
+  name: Ontario_Province
+  h3_resolution: 5
+  geojson_path: /Utilisateurs/dbenguer/ntn_tn_optim/data/region.geojson
+population:
+  total_city_users: 6960
+  total_rural_users: 1040
+  city_scatter_std_dev: 0.15
+  rural_scatter_std_dev: 0.05
+  use_worldpop: true
+  worldpop_tif_path: /Utilisateurs/dbenguer/ntn_tn_optim/data/raw/can_pop_2020_CN_1km_R2025A_UA_v1.tif
+  worldpop_tif_restricted: false
+  cities:
+    Toronto:
+      coords:
+      - 43.65
+      - -79.38
+      weight: 0.26
+    Ottawa:
+      coords:
+      - 45.42
+      - -75.69
+      weight: 0.21
+    Hamilton:
+      coords:
+      - 43.25
+      - -79.87
+      weight: 0.2
+    London:
+      coords:
+      - 42.98
+      - -81.25
+      weight: 0.14
+    Kingston:
+      coords:
+      - 44.23
+      - -76.49
+      weight: 0.12
+    Sudbury:
+      coords:
+      - 46.49
+      - -81.01
+      weight: 0.07
+  mobility:
+    num_attractors: 3
+    zipf_alpha: 1.2
+    pareto_beta: 1.75
+    delta_r0_km: 1.5
+    cutoff_kappa_km: 80.0
+    gps_wander_std_dev: 0.005
+    night_move_chance: 0.1
+    day_move_chance: 0.4
+    night_hours_start: 22
+    night_hours_end: 6
+  traffic:
+    profiles:
+      light:
+        probability: 0.2
+        min_mbps: 0.1
+        max_mbps: 1.0
+      medium:
+        probability: 0.6
+        min_mbps: 1.5
+        max_mbps: 5.0
+      heavy:
+        probability: 0.2
+        min_mbps: 10.0
+        max_mbps: 25.0
+    diurnal_curve:
+      base_traffic_multiplier: 0.0122
+      noon_peak:
+        center_hour: 12.0
+        width_hours: 3.0
+        height_multiplier: 0.0285
+      evening_peak:
+        center_hour: 20.0
+        width_hours: 2.5
+        height_multiplier: 0.058
+terrestrial:
+  users_per_cluster_ratio: 15
+  density_threshold: 100
+  use_physical_radius: true
+  fixed_coverage_radius_km: false
+  target_users_per_site: 100
+  min_users_per_tn_cluster: 50
+  terrestrial.overlap_factor: 0.2
+  g_rx_ue_dbi: 0.0
+  sinr_min_db: -5.0
+  body_loss_db: 3.0
+  noise_figure_db: 7.0
+  ue_height_m: 1.5
+  shadowing_std_dev_db: 8.0
+  scenarios:
+    UMA:
+      p_tx_dbm: 46.0
+      g_tx_dbi: 17.0
+      carrier_freq_hz: 3500000000.0
+      bandwidth_hz: 100000000.0
+      coverage_radius_km: 0.474
+      default_h_bs: 25.0
+      shadow_sigma_los_db: 4.0
+      shadow_sigma_nlos_db: 6.0
+      bs_capacity_mbps: 0.0
+      interference_cutoff_m: 5000.0
+      min_user_dist_m: 10.0
+    UMI:
+      p_tx_dbm: 38.0
+      g_tx_dbi: 10.0
+      carrier_freq_hz: 3500000000.0
+      bandwidth_hz: 100000000.0
+      coverage_radius_km: 0.311
+      default_h_bs: 10.0
+      shadow_sigma_los_db: 4.0
+      shadow_sigma_nlos_db: 7.82
+      bs_capacity_mbps: 0.0
+      interference_cutoff_m: 5000.0
+      min_user_dist_m: 10.0
+    RMA:
+      p_tx_dbm: 46.0
+      g_tx_dbi: 15.0
+      carrier_freq_hz: 700000000.0
+      bandwidth_hz: 20000000.0
+      coverage_radius_km: 2.847
+      default_h_bs: 35.0
+      shadow_sigma_los_db: 4.0
+      shadow_sigma_nlos_db: 8.0
+      bs_capacity_mbps: 0.0
+      interference_cutoff_m: 10000.0
+      min_user_dist_m: 10.0
+    INH:
+      p_tx_dbm: 24.0
+      g_tx_dbi: 5.0
+      carrier_freq_hz: 4000000000.0
+      bandwidth_hz: 100000000.0
+      coverage_radius_km: 0.144
+      default_h_bs: 3.0
+      shadow_sigma_los_db: 3.0
+      shadow_sigma_nlos_db: 8.03
+      bs_capacity_mbps: 0.0
+      interference_cutoff_m: 150.0
+      min_user_dist_m: 1.0
+    INF_SH:
+      p_tx_dbm: 30.0
+      g_tx_dbi: 15.0
+      carrier_freq_hz: 28000000000.0
+      bandwidth_hz: 400000000.0
+      coverage_radius_km: 0.106
+      default_h_bs: 8.0
+      shadow_sigma_los_db: 2.0
+      shadow_sigma_nlos_db: 4.0
+      bs_capacity_mbps: 0.0
+      interference_cutoff_m: 600.0
+      min_user_dist_m: 1.0
+epoch_utc: '2024-01-01T00:00:00'
+random_seed: 42
+simulation:
+  duration_s: 72000
+  time_step_s: 3600
+  beam_capacity_mbps: 500.0
+  allow_spillover: false
+  visualization_sampling: false
+  visualization_sample_rate: 1
+observer:
+  name: Ottawa
+  lat: 45.4215
+  lon: -75.6972
+visualize_2d: true
+visualize_3d: true

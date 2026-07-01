@@ -1,0 +1,29 @@
+defaults:
+  - constellation
+  - cost
+  - scenario: ontario_full
+  - population: ontario_demographics
+  - terrestrial: 5g_base
+  - mobility
+  - optimization
+  - _self_
+
+epoch_utc: "2024-01-01T00:00:00"
+random_seed: 42
+simulation:
+  duration_s: 72000         # 24 hours (86400 in seconds)
+  time_step_s: 3600         # 1 hour per step
+  beam_capacity_mbps: 500.0 
+  allow_spillover: False           # Allow users to connect to BSs outside their coverage if they have demand and the BS has capacity
+  visualization_sampling: False
+  visualization_sample_rate: 1     # Sample every N hours for visualization (if visualization_sampling is True)
+
+# Ground Observer for testing
+observer:
+  name: "Ottawa"
+  lat: 45.4215
+  lon: -75.6972
+
+# Visualization Toggles
+visualize_2d: true
+visualize_3d: true

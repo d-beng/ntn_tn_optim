@@ -1,0 +1,73 @@
+total_city_users: 6960
+total_rural_users: 1040
+city_scatter_std_dev: 0.15
+rural_scatter_std_dev: 0.05
+use_worldpop: True
+worldpop_tif_path: "/Utilisateurs/dbenguer/ntn_tn_optim/data/raw/can_pop_2020_CN_1km_R2025A_UA_v1.tif"
+worldpop_tif_restricted: False
+
+
+
+cities:
+  Toronto:
+    coords: [43.65, -79.38]
+    weight: 0.26
+  Ottawa:
+    coords: [45.42, -75.69]
+    weight: 0.21
+  Hamilton:
+    coords: [43.25, -79.87]
+    weight: 0.20
+  London:
+    coords: [42.98, -81.25]
+    weight: 0.14
+  Kingston:
+    coords: [44.23, -76.49]
+    weight: 0.12
+  Sudbury:
+    coords: [46.49, -81.01]
+    weight: 0.07
+
+# ------------------------------------------
+# STEPS MOBILITY MATH
+# ------------------------------------------
+mobility:
+  num_attractors: 3
+  zipf_alpha: 1.2
+  pareto_beta: 1.75
+  delta_r0_km: 1.5
+  cutoff_kappa_km: 80.0
+  gps_wander_std_dev: 0.005
+  night_move_chance: 0.10
+  day_move_chance: 0.40
+  night_hours_start: 22
+  night_hours_end: 6
+
+# ------------------------------------------
+# USER TRAFFIC PROFILES & DIURNAL CURVE
+# ------------------------------------------
+traffic:
+  profiles:
+    light:
+      probability: 0.20
+      min_mbps: 0.1
+      max_mbps: 1.0
+    medium:
+      probability: 0.60
+      min_mbps: 1.5
+      max_mbps: 5.0
+    heavy:
+      probability: 0.20
+      min_mbps: 10.0
+      max_mbps: 25.0
+      
+  diurnal_curve:
+    base_traffic_multiplier: 0.0122
+    noon_peak:
+      center_hour: 12.0
+      width_hours: 3.0
+      height_multiplier: 0.0285
+    evening_peak:
+      center_hour: 20.0
+      width_hours: 2.5
+      height_multiplier: 0.058

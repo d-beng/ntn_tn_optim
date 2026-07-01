@@ -1,0 +1,78 @@
+users_per_cluster_ratio: 15    
+density_threshold: 100       
+use_physical_radius: True    
+fixed_coverage_radius_km: False  
+target_users_per_site: 100     # realistic macro load; tune to your operator
+min_users_per_tn_cluster: 25
+overlap_factor: 0.1
+
+# Shared RF Defaults
+g_rx_ue_dbi: 0.0             
+sinr_min_db: -5.0           
+body_loss_db: 3.0             
+noise_figure_db: 7.0
+ue_height_m: 1.5
+shadowing_std_dev_db: 8.0     # Log-normal shadowing standard deviation
+
+scenarios:
+  UMA:
+    p_tx_dbm: 46.0                
+    g_tx_dbi: 17.0                
+    carrier_freq_hz: 3.5e9      
+    bandwidth_hz: 100e6    
+    coverage_radius_km: 0.474       
+    default_h_bs: 25.0
+    shadow_sigma_los_db: 4.0
+    shadow_sigma_nlos_db: 6.0
+    bs_capacity_mbps: 0.0
+    interference_cutoff_m: 5000.0
+    min_user_dist_m: 35.0
+
+  UMI:
+    p_tx_dbm: 38.0                
+    g_tx_dbi: 10.0                
+    carrier_freq_hz: 3.5e9      
+    bandwidth_hz: 100e6           
+    coverage_radius_km: 0.311
+    default_h_bs: 10.0
+    shadow_sigma_los_db: 4.0
+    shadow_sigma_nlos_db: 7.82
+    bs_capacity_mbps: 0.0
+    interference_cutoff_m: 5000.0
+    min_user_dist_m: 25.0
+  RMA:
+    p_tx_dbm: 46.0                
+    g_tx_dbi: 15.0                
+    carrier_freq_hz: 700e6      
+    bandwidth_hz: 20e6           
+    coverage_radius_km: 2.847
+    default_h_bs: 35.0
+    shadow_sigma_los_db: 4.0
+    shadow_sigma_nlos_db: 8.0
+    bs_capacity_mbps: 0.0
+    interference_cutoff_m: 10000.0
+    min_user_dist_m: 35.0
+  INH:
+    p_tx_dbm: 24.0                
+    g_tx_dbi: 5.0                
+    carrier_freq_hz: 4.0e9      
+    bandwidth_hz: 100e6           
+    coverage_radius_km: 0.144
+    default_h_bs: 3.0
+    shadow_sigma_los_db: 3.0
+    shadow_sigma_nlos_db: 8.03
+    bs_capacity_mbps: 0.0
+    interference_cutoff_m: 150.0
+    min_user_dist_m: 1.0
+  INF_SH:
+    p_tx_dbm: 30.0                
+    g_tx_dbi: 15.0                
+    carrier_freq_hz: 28.0e9      
+    bandwidth_hz: 400e6           
+    coverage_radius_km: 0.106
+    default_h_bs: 8.0
+    shadow_sigma_los_db: 2.0
+    shadow_sigma_nlos_db: 4.0
+    bs_capacity_mbps: 0.0
+    interference_cutoff_m: 600.0
+    min_user_dist_m: 1.0

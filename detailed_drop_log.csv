@@ -1,0 +1,1 @@
+Time_s,Hour,User_ID,Lat,Lon,Demand_Mbps,TN_Eval_BS,TN_Eval_MHz,TN_SINR_dB,TN_Reason,NTN_Eval_Beam,NTN_Eval_MHz,NTN_SINR_dB,NTN_Reason,TN_S_dBm,TN_I_dBm,TN_N_dBm,TN_NumIntf,TN_IoverN_dB,Final_State
