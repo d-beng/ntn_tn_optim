@@ -7,7 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1                 # one program...
 #SBATCH --cpus-per-task=250         # ...with this many cores -> this is what the ProcessPool gets
-#SBATCH --mem=400GB
+#SBATCH --mem=500GB
 #SBATCH --error=job-%j.err
 #SBATCH --output=job-%j.out
 #SBATCH --mail-user=djad.benguerra@univ-lr.fr
@@ -93,4 +93,4 @@ trap copy_back EXIT
 # ============================================================
 echo "Launching simulation on ${SLURM_CPUS_PER_TASK} cores..."
 export PYTHONUNBUFFERED=1
-python bases.py
+python scenario.py

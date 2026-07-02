@@ -277,39 +277,6 @@ def _find_uncovered_users(all_coords, candidates, cfg):
     return np.where(~covered)[0]
 
 
-
-# ----------------------------------------------------------------------
-# DETERMINISTIC MOBILITY SUPPORT
-# move() is stochastic, so sampled positions can never cover every possible
-# landing spot. But the SUPPORT of the mobility process is deterministic:
-# each user can only ever be at {home} U {their attractors} (+ GPS wander).
-# We collect the union of all DISTINCT attractor sites (locations, not people;
-# each site once -> no double counting) and require coverage over them too.
-# Then any random draw in the simulation lands on covered ground by construction.
-# ----------------------------------------------------------------------
-def _collect_attractor_points(users) -> np.ndarray:
-    seen = set()
-    pts = []
-    for u in users:
-        try:
-            attrs = getattr(u, "attractors", None) or []
-        except Exception:
-            attrs = []
-        for a in attrs:
-            try:
-                la, lo = float(a[0]), float(a[1])
-            except Exception:
-                continue
-            key = (round(la, 4), round(lo, 4))   # ~11 m dedupe grid
-            if key in seen:
-                continue
-            seen.add(key)
-            pts.append((la, lo))
-    if not pts:
-        return np.zeros((0, 2), dtype=np.float32)
-    return np.asarray(pts, dtype=np.float32)
-
-
 def _backfill_rma(all_coords, uncovered_idx, bs_cfg, cfg, random_seed):
     """GEOMETRIC gap-fill: cover the uncovered (gap) users with RMa cells.
 
@@ -568,16 +535,9 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
     # cluster; empty land stays uncovered -> NTN).
     # ------------------------------------------------------------------
     if bool(_cfg_get(cfg, "terrestrial.rma_backfill", True)):
-        # Deterministic support: user positions + every distinct attractor site.
-        attr_pts = _collect_attractor_points(users)
-        if len(attr_pts):
-            print(f"   Mobility support: {len(attr_pts):,} distinct attractor sites "
-                  f"added to coverage requirement.", flush=True)
-            support_coords = np.vstack([all_coords, attr_pts]).astype(np.float32)
-        else:
-            support_coords = all_coords
-        uncovered_idx = _find_uncovered_users(support_coords, candidates, cfg)
-        rma_fill = _backfill_rma(support_coords, uncovered_idx, bs_cfg, cfg, random_seed)
+        uncovered_idx = _find_uncovered_users(all_coords, candidates, cfg)
+        n_uncov = len(uncovered_idx)
+        rma_fill = _backfill_rma(all_coords, uncovered_idx, bs_cfg, cfg, random_seed)
         candidates.extend(rma_fill)
 
     # ------------------------------------------------------------------
