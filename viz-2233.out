@@ -1,0 +1,23 @@
+==================================================
+  NTN-TN Hour-20 Drop Map Reconstruction
+  Results dir : /Utilisateurs/dbenguer/ntn_tn_optim
+  Script      : /Utilisateurs/dbenguer/ntn_tn_optim/reconstruct_hour20.py
+==================================================
+
+🗺  Hour 20 Drop Map Reconstruction
+=============================================
+  Extracting tower positions from /Utilisateurs/dbenguer/ntn_tn_optim/Final_Animation.html …
+  Found 64976 tower polygons, 64976 radius labels.
+  → 25,976 unique tower sites (sectors merged).
+  Loading /Utilisateurs/dbenguer/ntn_tn_optim/detailed_drop_log.csv …
+  → 2,165,402 dropped users at hour 20.0.
+  Sub-sampled to 300,000 for rendering.
+  Plotting 25,976 tower sites …
+  Plotting 300,000 dropped users …
+  Saving /Utilisateurs/dbenguer/ntn_tn_optim/hour20_drops.html …
+  ✅  Saved /Utilisateurs/dbenguer/ntn_tn_optim/hour20_drops.html  (25.5 MB)
+
+  Open /Utilisateurs/dbenguer/ntn_tn_optim/hour20_drops.html in a browser.
+
+
+Done. Output: /Utilisateurs/dbenguer/ntn_tn_optim/hour20_drops.html
