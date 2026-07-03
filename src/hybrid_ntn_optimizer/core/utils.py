@@ -12,6 +12,25 @@ from typing import Tuple
 from hybrid_ntn_optimizer.core.constants import EARTH_RADIUS_M, EARTH_MU
 import os
 
+
+def calculate_bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the initial navigational bearing (0-360 degrees) from Point 1 (BS) to Point 2 (User)."""
+    lat1_rad, lon1_rad, lat2_rad, lon2_rad = map(math.radians, [lat1, lon1, lat2, lon2])
+    d_lon = lon2_rad - lon1_rad
+
+    # Easting and Northing components
+    x = math.sin(d_lon) * math.cos(lat2_rad)
+    y = math.cos(lat1_rad) * math.sin(lat2_rad) - math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(d_lon)
+
+    # atan2(x, y) yields angle from North (0 degrees)
+    initial_bearing = math.atan2(x, y)
+    return (math.degrees(initial_bearing) + 360) % 360
+
+def angular_distance(angle1: float, angle2: float) -> float:
+    """Calculate the shortest angular distance between two azimuths (0 to 180 degrees)."""
+    diff = abs(angle1 - angle2) % 360
+    return diff if diff <= 180 else 360 - diff
+
 def _detect_cpus() -> int:
     """CPUs actually allocated to this process — not the node's physical count.
     SLURM allocation first, then scheduler affinity (respects the cgroup cpuset),

@@ -1,9 +1,7 @@
 import os
-import math
 from time import sleep
 from concurrent.futures import ProcessPoolExecutor
 
-import numpy as np
 import pandas as pd
 from typing import List, Dict, Any
 from omegaconf import DictConfig
@@ -21,143 +19,82 @@ from hybrid_ntn_optimizer.link_budget.sector_antenna import (
     sector_gain_db, in_sector,
 )
 
-from scipy.spatial import cKDTree
-
 
 # ======================================================================
-# [PARALLEL + SPATIAL] Worker-side state and function for PHASE 1
+# [PARALLEL] Worker-side state and function for PHASE 1 (cell attachment)
 # ----------------------------------------------------------------------
-# SPEED FIX: previously every user scanned the ENTIRE base-station list
-# (O(all cells)) twice — once for serving candidates and once for
-# interferers. With sectorization tripling the cell count this became the
-# dominant cost. We now build ONE KD-tree over cell positions (in a local
-# equirectangular km plane) at pool-init time. Each user then queries only:
-#   - serving candidates: cells whose center is within the max coverage radius,
-#   - interferers: cells within the max interference cutoff.
-# This turns per-user work from O(all cells) into O(nearby cells), so a
-# 3-sector deployment costs almost the same as omni.
+# Each worker process receives the FULL list of BaseStation objects ONCE,
+# at pool-creation time, via the initializer. PHASE 1 only ever READS
+# static geometry / RF parameters off the base stations (lat, lon, radius,
+# tx power, gains, freq, heights, shadow sigmas, interference cutoff,
+# min user distance). None of those change during the simulation, so a
+# one-time snapshot in each worker is correct and avoids re-pickling the
+# base stations on every time step.
 #
-# SECTORIZATION (3GPP TR 38.901 macro geometry; TR 36.942 4.2.1 pattern):
-#   - a user may only attach to a sector whose 120-deg wedge contains it;
-#   - the serving cell's antenna gain includes its horizontal sector offset;
-#   - co-located sectors of the serving SITE (same site_id) are not counted
-#     as interferers (they point away);
-#   - each remaining interferer sector's pattern offset toward the user is
-#     applied. SINR is computed only ONCE per user (for the single serving
-#     sector that passes the wedge test); a site's other two sectors are
-#     rejected by the cheap angle test before any SINR math.
+# IMPORTANT: the worker performs NO shared mutation. It returns a plain
+# tuple per user; the main process applies the attachment decisions
+# serially, preserving the exact branching of the original code.
 # ======================================================================
 _BASE_STATIONS: List[BaseStation] = []
 _G_RX_UE_DBI: float = 0.0
-_KD = None
-_CELL_XY = None
-_LAT0 = 0.0
-_MAX_COV_R_KM = 0.0
-_MAX_INTF_CUTOFF_M = 0.0
-_R_EARTH_KM = 6371.0088
 
-
-def _project_km(lat, lon, lat0):
-    x = math.radians(lon) * math.cos(math.radians(lat0)) * _R_EARTH_KM
-    y = math.radians(lat) * _R_EARTH_KM
-    return x, y
-
-
-def _init_attachment_worker(base_stations, g_rx_ue_dbi, lat0,
-                            cell_xy, max_cov_r_km, max_intf_cutoff_m):
-    """Pool initializer: store the static snapshot + spatial index per worker."""
-    global _BASE_STATIONS, _G_RX_UE_DBI, _KD, _CELL_XY, _LAT0
-    global _MAX_COV_R_KM, _MAX_INTF_CUTOFF_M
+def _init_attachment_worker(base_stations: List[BaseStation], g_rx_ue_dbi: float) -> None:
+    """Pool initializer: store the static base-station snapshot per worker."""
+    global _BASE_STATIONS, _G_RX_UE_DBI
     _BASE_STATIONS = base_stations
     _G_RX_UE_DBI = g_rx_ue_dbi
-    _LAT0 = lat0
-    _CELL_XY = cell_xy
-    _MAX_COV_R_KM = max_cov_r_km
-    _MAX_INTF_CUTOFF_M = max_intf_cutoff_m
-    if cKDTree is not None and cell_xy is not None and len(cell_xy):
-        _KD = cKDTree(cell_xy)
-    else:
-        _KD = None
 
 
 def _evaluate_attachment(user_pos):
-    """Side-effect-free PHASE 1 inner loop with spatial pre-filtering + sectors.
+    """Pure, side-effect-free transcription of the original PHASE 1 inner loop.
 
     Input : (user_lat, user_lon)
-    Output: (best_bs_id, best_sinr, best_spec_eff, best_diag)
+    Output: (best_bs_id, best_sinr, best_spec_eff)
+            best_bs_id is None when no tower is in geographic range.
     """
     u_lat, u_lon = user_pos
+    candidate_towers = _BASE_STATIONS
+
     best_bs_id = None
     best_sinr = -999.0
     best_spec_eff = 0.0
     best_diag = {"S_dBm": float('nan'), "I_dBm": float('nan'),
-                 "N_dBm": float('nan'), "num_interferers": 0,
-                 "IoverN_dB": float('nan')}
+             "N_dBm": float('nan'), "num_interferers": 0,
+             "IoverN_dB": float('nan')}
 
-    # --- SPATIAL PREFILTER: candidate serving cells + candidate interferers ---
-    if _KD is not None:
-        ux, uy = _project_km(u_lat, u_lon, _LAT0)
-        serving_idx = _KD.query_ball_point((ux, uy), _MAX_COV_R_KM)
-        if not serving_idx:
-            return (None, best_sinr, best_spec_eff, best_diag)
-        intf_idx = _KD.query_ball_point((ux, uy), _MAX_INTF_CUTOFF_M / 1000.0)
-        intf_cells = [_BASE_STATIONS[i] for i in intf_idx]
-    else:
-        serving_idx = range(len(_BASE_STATIONS))
-        intf_cells = _BASE_STATIONS
-
-    for si in serving_idx:
-        bs = _BASE_STATIONS[si]
+    for bs in candidate_towers:
         d_m = haversine_distance(u_lat, u_lon, bs.lat, bs.lon)
-        if (d_m / 1000.0) > bs.coverage_radius_km:
-            continue
+        if (d_m / 1000.0) <= bs.coverage_radius_km:
+            d_m = max(d_m, bs.min_user_dist_m)
 
-        # SECTOR ADMISSION: user must lie inside this sector's wedge (omni passes)
-        if not in_sector(bs.lat, bs.lon, getattr(bs, "sector_azimuth_deg", None),
-                         u_lat, u_lon):
-            continue
+            interferers = []
+            for other in candidate_towers:
+                if other.bs_id == bs.bs_id:
+                    continue
+                dist = haversine_distance(u_lat, u_lon, other.lat, other.lon)
+                if dist <= other.interference_cutoff_m:
+                    dist = max(dist, other.min_user_dist_m)
+                    interferers.append((other, dist))
 
-        d_m = max(d_m, bs.min_user_dist_m)
+            sinr_db, capacity_mbps, spec_eff, diag = calculate_tn_sinr_capacity(
+                dist_to_serving_m=d_m,
+                interferers=interferers,
+                scenario=bs.scenario,
+                p_tx_dbm=bs.p_tx_dbm,
+                g_tx_dbi=bs.g_tx_dbi,
+                g_rx_ue_dbi=_G_RX_UE_DBI,
+                carrier_freq_hz=bs.carrier_freq_hz,
+                bandwidth_hz=bs.total_bandwidth_hz,
+                bs_height_m=bs.bs_height_m,
+                shadow_sigma_los_db=bs.shadow_sigma_los_db,
+                shadow_sigma_nlos_db=bs.shadow_sigma_nlos_db,
+            )
 
-        # serving sector antenna gain offset toward the user (<=0 dB; 0 for omni)
-        serv_sector_gain = sector_gain_db(
-            bs.lat, bs.lon, getattr(bs, "sector_azimuth_deg", None), u_lat, u_lon)
-
-        # interferers: nearby cells within their own cutoff, excluding the
-        # serving cell AND all co-located sectors of the serving site.
-        interferers = []
-        serving_site = getattr(bs, "site_id", -2)
-        for other in intf_cells:
-            if other.bs_id == bs.bs_id:
-                continue
-            if getattr(other, "site_id", -1) == serving_site:
-                continue
-            dist = haversine_distance(u_lat, u_lon, other.lat, other.lon)
-            if dist <= other.interference_cutoff_m:
-                dist = max(dist, other.min_user_dist_m)
-                interferers.append((other, dist))
-
-        sinr_db, capacity_mbps, spec_eff, diag = calculate_tn_sinr_capacity(
-            dist_to_serving_m=d_m,
-            interferers=interferers,
-            scenario=bs.scenario,
-            p_tx_dbm=bs.p_tx_dbm,
-            g_tx_dbi=bs.g_tx_dbi + serv_sector_gain,
-            g_rx_ue_dbi=_G_RX_UE_DBI,
-            carrier_freq_hz=bs.carrier_freq_hz,
-            bandwidth_hz=bs.total_bandwidth_hz,
-            bs_height_m=bs.bs_height_m,
-            shadow_sigma_los_db=bs.shadow_sigma_los_db,
-            shadow_sigma_nlos_db=bs.shadow_sigma_nlos_db,
-            ue_lat=u_lat,
-            ue_lon=u_lon,
-        )
-
-        if sinr_db > best_sinr:
-            best_sinr = sinr_db
-            best_spec_eff = spec_eff
-            best_bs_id = bs.bs_id
-            best_diag = diag
+            if sinr_db > best_sinr:
+                best_sinr = sinr_db
+                best_spec_eff = spec_eff
+                best_bs_id = bs.bs_id
+                best_diag = diag
 
     return (best_bs_id, best_sinr, best_spec_eff, best_diag)
 
@@ -166,7 +103,7 @@ def run_daily_mobility_simulation(
     cfg: DictConfig,
     users: List[User],
     base_stations: List[BaseStation],
-    leos: List[LEOConstellation],
+    leos: List[LEOConstellation],  # <--- Now accepts the list of shells
     region: Region,
 ):
     print("\nStarting RF-Accurate Hybrid Mobility Simulation (Strict 3GPP Admission Control)...")
@@ -176,26 +113,20 @@ def run_daily_mobility_simulation(
     time_steps_s = list(range(20 * 3600, duration_s + time_step_s, time_step_s))
     allow_spillover = cfg.simulation.get("allow_spillover", True)
 
+    # [PARALLEL] Worker count. Set cfg.simulation.num_workers to control it.
+    #            <= 1 (or unset to 1) falls back to a plain serial map, which
+    #            is useful for debugging and avoids pool overhead on tiny runs.
     worker_count = int(cfg.simulation.get("num_workers", _detect_cpus() or 1))
     use_parallel = worker_count > 1
-
-    # [SPATIAL] km-plane projection + per-cell coord array, built once and
-    # shipped to workers so each builds its own KD-tree.
-    if base_stations:
-        lat0 = float(sum(bs.lat for bs in base_stations) / len(base_stations))
-    else:
-        lat0 = 0.0
-    cell_xy = np.array(
-        [_project_km(bs.lat, bs.lon, lat0) for bs in base_stations],
-        dtype=np.float64) if base_stations else np.zeros((0, 2))
-    max_cov_r_km = max((bs.coverage_radius_km for bs in base_stations), default=0.0)
-    max_intf_cutoff_m = max((bs.interference_cutoff_m for bs in base_stations), default=0.0)
 
     hex_to_candidate_towers: Dict[str, List[BaseStation]] = {}
     for bs in base_stations:
         for hex_id in bs.covered_h3_ids:
-            hex_to_candidate_towers.setdefault(hex_id, []).append(bs)
+            if hex_id not in hex_to_candidate_towers:
+                hex_to_candidate_towers[hex_id] = []
+            hex_to_candidate_towers[hex_id].append(bs)
 
+    # [PARALLEL] Static lookup so we can map a returned bs_id back to its object.
     bs_by_id: Dict[Any, BaseStation] = {bs.bs_id: bs for bs in base_stations}
 
     user_data_export = []
@@ -211,20 +142,19 @@ def run_daily_mobility_simulation(
     g_rx_ue_dbi = cfg.terrestrial.get("g_rx_ue_dbi", 0.0)
     sinr_min_tn = cfg.terrestrial.get("sinr_min_db", -3.0)
 
+    # [PARALLEL] Create the pool ONCE outside the time loop and reuse it for
+    #            every step. The base-station snapshot is shipped to workers a
+    #            single time here via initargs.
     executor = None
     try:
         if use_parallel:
             executor = ProcessPoolExecutor(
                 max_workers=worker_count,
                 initializer=_init_attachment_worker,
-                initargs=(base_stations, g_rx_ue_dbi, lat0,
-                          cell_xy, max_cov_r_km, max_intf_cutoff_m),
+                initargs=(base_stations, g_rx_ue_dbi),
             )
-            print(f"\u2699\ufe0f  PHASE 1 parallelism enabled: {worker_count} worker processes "
-                  f"(spatial KD-tree prefilter, {len(base_stations):,} cells).")
+            print(f"\u2699\ufe0f  PHASE 1 parallelism enabled: {worker_count} worker processes.")
         else:
-            _init_attachment_worker(base_stations, g_rx_ue_dbi, lat0,
-                                    cell_xy, max_cov_r_km, max_intf_cutoff_m)
             print("\u2699\ufe0f  PHASE 1 running serially (num_workers <= 1).")
 
         for t_s in time_steps_s:
@@ -256,13 +186,20 @@ def run_daily_mobility_simulation(
                 u.move(hour_of_day, region.h3_resolution)
 
             # ==================================================
-            # PHASE 1: CELL ATTACHMENT  [PARALLEL + SPATIAL]
+            # PHASE 1: CELL ATTACHMENT  [PARALLEL]
+            # --------------------------------------------------
+            # Compute step (parallel): each active user is evaluated
+            # independently and returns a pure result tuple.
+            # Mutation step (serial): results are applied in input order,
+            # so the attachment outcome is deterministic and identical to
+            # the original serial implementation.
             # ==================================================
             active_users = [u for u in users if u.current_demand >= 0.1]
             payload = [(u.current_lat, u.current_lon) for u in active_users]
 
             if active_users:
                 if executor is not None:
+                    # chunksize amortizes IPC: fewer, larger batches per worker.
                     chunk = max(1, len(active_users) // (worker_count * 4))
                     results = executor.map(_evaluate_attachment, payload, chunksize=chunk)
                 else:
@@ -438,6 +375,7 @@ def run_daily_mobility_simulation(
             print(f"  [t={t_s:05d}s | {hour_of_day:04.1f}h] Demand: {total_demand:7.1f} | TN Served: {total_served_tn:7.1f} | NTN Served: {total_served_ntn:7.1f} | Dropped: {dropped_traffic:7.1f} Mbps")
 
     finally:
+        # [PARALLEL] Always release the worker processes.
         if executor is not None:
             executor.shutdown()
 

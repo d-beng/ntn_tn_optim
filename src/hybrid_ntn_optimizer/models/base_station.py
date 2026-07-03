@@ -46,6 +46,9 @@ class BaseStation:
     attached_users: List[Any] = field(default_factory=list)     
     remaining_capacity_mbps: float = field(init=False)
     
+    site_id: int = -1
+    sector_azimuth: float = None
+    
     def __post_init__(self):
         self.remaining_capacity_mbps = self.capacity_mbps
         self.remaining_bandwidth_hz = self.total_bandwidth_hz
