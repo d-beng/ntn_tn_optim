@@ -55,13 +55,13 @@ echo "  Results dir : ${RESULTS_DIR}"
 echo "  Script      : ${SCRIPT}"
 echo "=================================================="
 
+
 python "${SCRIPT}" \
     --animation  "${RESULTS_DIR}/Final_Animation.html" \
     --log        "${RESULTS_DIR}/detailed_drop_log.csv" \
     --out        "${RESULTS_DIR}/hour20_drops.html" \
     --hour       20.0 \
     --max-users  300000 \
-    --max-towers 40000
 
 echo ""
 echo "Done. Output: ${RESULTS_DIR}/hour20_drops.html"

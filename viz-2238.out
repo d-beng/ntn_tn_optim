@@ -1,0 +1,27 @@
+==================================================
+  NTN-TN Hour-20 Drop Map Reconstruction
+  Results dir : /Utilisateurs/dbenguer/ntn_tn_optim
+  Script      : /Utilisateurs/dbenguer/ntn_tn_optim/reconstruct_hour20.py
+==================================================
+
+   Hour-20 Drop Map  (Plotly + coverage radius circles)
+=======================================================
+  Extracting tower data from /Utilisateurs/dbenguer/ntn_tn_optim/Final_Animation.html ...
+  -> 25,976 unique sites  (UMi 6,476  UMa 2,810  RMa 16,690)
+  Loading /Utilisateurs/dbenguer/ntn_tn_optim/detailed_drop_log.csv ...
+  -> 2,165,402 dropped users at hour 20.0.
+  Sub-sampled to 300,000.
+
+  Building Plotly figure ...
+  Building coverage-circle GeoJSON layers ...
+    UMI: 6,476 circles (12-pt polygons)
+    UMA: 2,810 circles (16-pt polygons)
+    RMA: 16,690 circles (20-pt polygons)
+  Saving /Utilisateurs/dbenguer/ntn_tn_optim/hour20_drops.html ...
+
+  Saved /Utilisateurs/dbenguer/ntn_tn_optim/hour20_drops.html  (49.5 MB)
+  Requires internet to load Plotly from CDN.
+  For offline: change include_plotlyjs='cdn' -> True
+
+
+Done. Output: /Utilisateurs/dbenguer/ntn_tn_optim/hour20_drops.html
