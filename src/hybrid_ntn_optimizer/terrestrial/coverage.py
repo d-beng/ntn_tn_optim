@@ -6,22 +6,10 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from omegaconf import DictConfig, OmegaConf
+import h3
+from threadpoolctl import threadpool_limits
 
-try:
-    import h3
-except Exception:  # pragma: no cover
-    h3 = None
-
-try:
-    from threadpoolctl import threadpool_limits
-except Exception:  # pragma: no cover
-    threadpool_limits = None
-
-try:
-    from scipy.spatial import ConvexHull, cKDTree
-except Exception:  # pragma: no cover
-    ConvexHull = None
-    cKDTree = None
+from scipy.spatial import ConvexHull, cKDTree
 
 from hybrid_ntn_optimizer.models.user import User
 from hybrid_ntn_optimizer.models.base_station import BaseStation, DeploymentScenario
@@ -278,39 +266,7 @@ def _find_uncovered_users(all_coords, candidates, cfg):
 
 
 
-# ----------------------------------------------------------------------
-# DETERMINISTIC MOBILITY SUPPORT
-# move() is stochastic, so sampled positions can never cover every possible
-# landing spot. But the SUPPORT of the mobility process is deterministic:
-# each user can only ever be at {home} U {their attractors} (+ GPS wander).
-# We collect the union of all DISTINCT attractor sites (locations, not people;
-# each site once -> no double counting) and require coverage over them too.
-# Then any random draw in the simulation lands on covered ground by construction.
-# ----------------------------------------------------------------------
-def _collect_attractor_points(users) -> np.ndarray:
-    seen = set()
-    pts = []
-    for u in users:
-        try:
-            attrs = getattr(u, "attractors", None) or []
-        except Exception:
-            attrs = []
-        for a in attrs:
-            try:
-                la, lo = float(a[0]), float(a[1])
-            except Exception:
-                continue
-            key = (round(la, 4), round(lo, 4))   # ~11 m dedupe grid
-            if key in seen:
-                continue
-            seen.add(key)
-            pts.append((la, lo))
-    if not pts:
-        return np.zeros((0, 2), dtype=np.float32)
-    return np.asarray(pts, dtype=np.float32)
-
-
-def _backfill_rma(all_coords, uncovered_idx, bs_cfg, cfg, random_seed):
+def _backfill_rma(all_coords, uncovered_idx, bs_cfg, cfg, random_seed, density_map=None):
     """GEOMETRIC gap-fill: cover the uncovered (gap) users with RMa cells.
 
     The backfill's job is COVERAGE, not capacity -- fill the geographic gaps
@@ -358,9 +314,11 @@ def _backfill_rma(all_coords, uncovered_idx, bs_cfg, cfg, random_seed):
         # node km -> lat/lon
         clat = math.degrees(ny / R)
         clon = math.degrees(nx / (R * math.cos(lat0)))
+        cell = h3.latlng_to_cell(clat, clon, dens_res)
+        real_dens = float(density_map.get(cell, 0.0)) if density_map else 0.0
         out.append({
             "lat": clat, "lon": clon,
-            "raw_radius_km": rma_r, "density": 0.0,
+            "raw_radius_km": rma_r, "density": real_dens,
             "assigned_user_count": int(len(g)),
             "membership_boundary": _make_radius_boundary((clat, clon), rma_r, 24),
             "zone_radius_km": rma_r, "zone_size": int(len(g)),
@@ -568,48 +526,82 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
     # cluster; empty land stays uncovered -> NTN).
     # ------------------------------------------------------------------
     if bool(_cfg_get(cfg, "terrestrial.rma_backfill", True)):
-        # Deterministic support: user positions + every distinct attractor site.
-        attr_pts = _collect_attractor_points(users)
-        if len(attr_pts):
-            print(f"   Mobility support: {len(attr_pts):,} distinct attractor sites "
-                  f"added to coverage requirement.", flush=True)
-            support_coords = np.vstack([all_coords, attr_pts]).astype(np.float32)
-        else:
-            support_coords = all_coords
-        uncovered_idx = _find_uncovered_users(support_coords, candidates, cfg)
-        rma_fill = _backfill_rma(support_coords, uncovered_idx, bs_cfg, cfg, random_seed)
+        # Backfill covers UNCOVERED USER POSITIONS only. NOTE: we deliberately do
+        # NOT try to cover every attractor site. Attractors are PER-USER points
+        # with Pareto-distributed jump lengths (see traffic/profiles.py), i.e.
+        # ~2-3 personal destinations per user => ~30M distinct points whose tail
+        # spreads across the whole province (+ gps_wander ~0.005 deg ~ 550 m).
+        # Covering that support would blanket the province with RMa. Rare
+        # stochastic landings in remote spots are the NTN's job by hybrid design.
+        uncovered_idx = _find_uncovered_users(all_coords, candidates, cfg)
+        rma_fill = _backfill_rma(all_coords, uncovered_idx, bs_cfg, cfg,
+                                 random_seed, density_map=density_map)
         candidates.extend(rma_fill)
 
     # ------------------------------------------------------------------
     # Build BaseStation objects (unchanged construction)
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # SECTORIZATION (3GPP TR 38.901 macro geometry; TR 36.942 4.2.1 pattern)
+    # Macro sites (UMa, RMa) are 3-SECTOR: 3 co-located cells at the same
+    # lat/lon with boresight azimuths 0/120/240 deg, each carrying the FULL
+    # channel bandwidth (frequency reuse-1 across sectors, directional
+    # antennas). Small cells (UMi) are single OMNI cells, as is common for
+    # street-level small-cell deployments. Each sector is its own BaseStation
+    # with its own bandwidth pool and attached_users, so PHASE2 MAC scheduling
+    # needs no change; sectors sharing a site are linked by site_id.
+    # Config: terrestrial.sectors_per_macro (default 3), terrestrial.umi_sectors
+    # (default 1). Set sectors_per_macro=1 to disable and recover omni behaviour.
+    # ------------------------------------------------------------------
+    sectors_per_macro = int(_cfg_get(cfg, "terrestrial.sectors_per_macro", 3))
+    umi_sectors = int(_cfg_get(cfg, "terrestrial.umi_sectors", 1))
+
     base_stations: List[BaseStation] = []
-    for bs_id_counter, c in enumerate(candidates):
+    bs_id_counter = 0
+    for site_id, c in enumerate(candidates):
         scenario_key = c["scenario_key"]
         sc = bs_cfg[scenario_key]
         center = (c["lat"], c["lon"])
         coverage_boundary = _make_radius_boundary(center, sc["coverage_radius_km"])
 
-        bs = BaseStation(
-            bs_id=bs_id_counter, lat=float(c["lat"]), lon=float(c["lon"]),
-            scenario=DeploymentScenario[scenario_key],
-            p_tx_dbm=sc["p_tx_dbm"], g_tx_dbi=sc["g_tx_dbi"],
-            carrier_freq_hz=sc["carrier_freq_hz"], total_bandwidth_hz=sc["bandwidth_hz"],
-            capacity_mbps=sc["bs_capacity_mbps"], bs_height_m=sc["default_h_bs"],
-            shadow_sigma_los_db=sc["shadow_sigma_los_db"], shadow_sigma_nlos_db=sc["shadow_sigma_nlos_db"],
-            interference_cutoff_m=sc["interference_cutoff_m"], coverage_radius_km=sc["coverage_radius_km"],
-            min_user_dist_m=sc["min_user_dist_m"], use_physical_radius=True)
+        # number of sectors for this site
+        n_sec = umi_sectors if scenario_key == "UMI" else sectors_per_macro
+        n_sec = max(1, n_sec)
+        # boresight azimuths evenly spaced; omni site (n_sec==1) -> azimuth None
+        if n_sec == 1:
+            azimuths = [None]
+        else:
+            azimuths = [(360.0 / n_sec) * k for k in range(n_sec)]
+        # users split across sectors -> per-sector expected load ~ 1/n_sec
+        per_sector_users = int(round(c["assigned_user_count"] / n_sec))
 
-        bs.voronoi_boundary = c["membership_boundary"]
-        bs.coverage_boundary = coverage_boundary
-        bs.assigned_user_count = int(c["assigned_user_count"])
-        bs.raw_cluster_radius_km = float(c["raw_radius_km"])
-        bs.cluster_density = float(c["density"])          # REAL people/km^2
-        bs.discovery_radius_km = float(c["zone_radius_km"])
-        bs.discovery_cluster_size = int(c["zone_size"])
-        bs.area_class = "TN-Service-Area"
-        bs.set_resolution(h3_resolution)
-        base_stations.append(bs)
+        for az in azimuths:
+            bs = BaseStation(
+                bs_id=bs_id_counter, lat=float(c["lat"]), lon=float(c["lon"]),
+                scenario=DeploymentScenario[scenario_key],
+                p_tx_dbm=sc["p_tx_dbm"], g_tx_dbi=sc["g_tx_dbi"],
+                carrier_freq_hz=sc["carrier_freq_hz"], total_bandwidth_hz=sc["bandwidth_hz"],
+                capacity_mbps=sc["bs_capacity_mbps"], bs_height_m=sc["default_h_bs"],
+                shadow_sigma_los_db=sc["shadow_sigma_los_db"], shadow_sigma_nlos_db=sc["shadow_sigma_nlos_db"],
+                interference_cutoff_m=sc["interference_cutoff_m"], coverage_radius_km=sc["coverage_radius_km"],
+                min_user_dist_m=sc["min_user_dist_m"], use_physical_radius=True)
+
+            # --- sector metadata (consumed by full_pipeline attachment + sinr) ---
+            bs.site_id = int(site_id)               # co-located sectors share this
+            bs.sector_azimuth_deg = az              # boresight; None => omni (UMi)
+            bs.num_sectors = int(n_sec)
+
+            bs.voronoi_boundary = c["membership_boundary"]
+            bs.coverage_boundary = coverage_boundary
+            bs.assigned_user_count = int(per_sector_users)
+            bs.raw_cluster_radius_km = float(c["raw_radius_km"])
+            bs.cluster_density = float(c["density"])          # REAL people/km^2
+            bs.discovery_radius_km = float(c["zone_radius_km"])
+            bs.discovery_cluster_size = int(c["zone_size"])
+            bs.area_class = "TN-Service-Area"
+            bs.set_resolution(h3_resolution)
+            base_stations.append(bs)
+            bs_id_counter += 1
 
     mix = {}
     for bs in base_stations:

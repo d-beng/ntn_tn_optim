@@ -7,8 +7,6 @@ References:
          Table 7.4.1-1  (path-loss formulas)
          Table 7.4.2-1  (shadowing standard-deviation values)
          Section 7.4.1  (LOS probability, breakpoint distance)
-- TN sector antenna: 3GPP TR 38.901 (3-sector macro geometry) +
-         3GPP TR 36.942 v15 clause 4.2.1 (horizontal antenna pattern).
 - NTN: 3GPP TR 38.821 v16.0.0 — Solutions for NR to Support NTN
          Section 6.1    (link-budget methodology)
          Table 6.1-1    (typical G/T figures)
@@ -35,15 +33,6 @@ Corrections applied vs. original:
             draw consistent random realisations.
   [ADD-2]  Scenario validity guards now warn (via warnings.warn) when inputs
             fall outside the specified TR 38.901 applicability ranges.
-  [SECTOR] calculate_tn_sinr_capacity now applies 3GPP sectorization on the
-            INTERFERER side: each interferer's horizontal sector pattern
-            (TR 36.942 4.2.1) attenuates its contribution by the angle between
-            that sector's boresight and the direction to the served UE. The
-            old flat interferer_beamforming_suppression_db is disabled by
-            default (set to 0.0) to avoid double-counting; the pattern models
-            it directionally instead. Requires ue_lat/ue_lon (the served UE
-            position) so per-interferer angles can be computed. Omni cells
-            (sector_azimuth_deg is None) get a 0 dB offset, i.e. unchanged.
 """
 
 import math
@@ -55,7 +44,6 @@ from typing import List, Tuple, Optional
 
 from hybrid_ntn_optimizer.core.constants import _H_E
 from hybrid_ntn_optimizer.models.base_station import BaseStation, DeploymentScenario
-from hybrid_ntn_optimizer.link_budget.sector_antenna import sector_gain_db
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -419,22 +407,20 @@ def calculate_tn_sinr_capacity(
     bs_height_m: float,
     dist_to_serving_m: float,
     interferers: List[Tuple[BaseStation, float]],
-    shadow_sigma_los_db: float,
+    shadow_sigma_los_db: float, 
     shadow_sigma_nlos_db: float,
     scenario: DeploymentScenario = DeploymentScenario.UMA,
     p_tx_dbm: float = 46.0,
     g_tx_dbi: float = 15.0,
     g_rx_ue_dbi: float = 0.0,
     serving_beamforming_gain_db: float = 12.0,
-    interferer_beamforming_suppression_db: float = 0.0,   # [SECTOR] see note
+    interferer_beamforming_suppression_db: float = 12.0,
     carrier_freq_hz: float = 3.5e9,
     bandwidth_hz: float = 100e6,
     body_loss_db: float = 3.0,
     noise_figure_db: float = 7.0,
     implementation_loss_factor: float = 0.65,
     ue_height_m: float = 1.5,
-    ue_lat: Optional[float] = None,      # [SECTOR] served UE position for
-    ue_lon: Optional[float] = None,      #          per-interferer sector angle
     seed: Optional[int] = None,
 ) -> Tuple[float, float, float]:
     """
@@ -443,31 +429,17 @@ def calculate_tn_sinr_capacity(
     The shadowing standard deviation is now drawn from the per-scenario,
     per-LOS-condition table in TR 38.901 Table 7.4.2-1.  [BUG-3 fix]
 
-    SECTORIZATION (3GPP TR 38.901 macro geometry; TR 36.942 4.2.1 pattern):
-      Each interferer's contribution is attenuated by its horizontal sector
-      antenna pattern toward the served UE. The angle is computed from the
-      interferer's boresight (bs_intf.sector_azimuth_deg) and the bearing from
-      the interferer to the UE (ue_lat/ue_lon). A sector facing away from the
-      UE interferes far less; an omni interferer (sector_azimuth_deg None) is
-      unchanged (0 dB offset). This DIRECTIONAL model replaces the old flat
-      interferer_beamforming_suppression_db, whose default is therefore now
-      0.0 to avoid double-counting. The SERVING side's sector gain is applied
-      by the caller (full_pipeline passes g_tx_dbi already offset), so it is
-      not re-applied here.
-
     Parameters
     ----------
     dist_to_serving_m              : 2-D distance to serving BS [m]
     interferers                    : list of tuples (BaseStation, 2-D distance) to interfering BSs [m]
     scenario                       : 3GPP deployment scenario
     p_tx_dbm                       : BS transmit power [dBm]
-    g_tx_dbi                       : BS antenna gain [dBi] (serving; may already
-                                     include the serving sector pattern offset)
+    g_tx_dbi                       : BS antenna gain [dBi]
     g_rx_ue_dbi                    : UE receive antenna gain [dBi]
     serving_beamforming_gain_db    : beamforming gain toward served UE [dB]
-    interferer_beamforming_suppression_db : legacy flat isolation [dB]; default
-                                     0.0 because the sector pattern now models
-                                     interferer directivity explicitly
+    interferer_beamforming_suppression_db : effective beam isolation for
+                                     interfering BSs [dB]
     carrier_freq_hz                : carrier frequency [Hz]
     bandwidth_hz                   : system bandwidth [Hz]
     body_loss_db                   : body/cable loss at UE [dB]
@@ -477,13 +449,11 @@ def calculate_tn_sinr_capacity(
     implementation_loss_factor     : ηₗₒₛₛ ∈ (0, 1] applied to Shannon SE
     ue_height_m                    : UE antenna height [m]
     bs_height_m                    : BS antenna height [m] (None → default)
-    ue_lat, ue_lon                 : served UE position (for interferer sector
-                                     angles); None → interferer pattern skipped
     seed                           : optional RNG seed for reproducibility
 
     Returns
     -------
-    (sinr_db, throughput_mbps, spectral_efficiency_bps_hz, diag)
+    (sinr_db, throughput_mbps, spectral_efficiency_bps_hz)
     """
     rng = np.random.default_rng(seed)
 
@@ -501,27 +471,16 @@ def calculate_tn_sinr_capacity(
     i_mw = 0.0
     for bs_intf, d_intf_m in interferers:
         pl_j_db, los_j = pathloss_3gpp(
-            bs_intf.scenario,
-            d_intf_m,
-            bs_intf.carrier_freq_hz,
-            bs_intf.bs_height_m
+            bs_intf.scenario, 
+            d_intf_m, 
+            bs_intf.carrier_freq_hz, 
+            bs_intf.bs_height_m 
         )
 
         sigma_j = bs_intf.shadow_sigma_los_db if los_j else bs_intf.shadow_sigma_nlos_db
         pl_j_db += body_loss_db + rng.normal(0.0, sigma_j)
 
-        # [SECTOR] directional interferer antenna gain toward the served UE.
-        # 0 dB for omni cells; negative (down to -30 dB) for sectors pointing
-        # away. Requires the UE position; if not provided, offset is 0 dB.
-        if ue_lat is not None and ue_lon is not None:
-            intf_sector_off = sector_gain_db(
-                bs_intf.lat, bs_intf.lon,
-                getattr(bs_intf, "sector_azimuth_deg", None),
-                ue_lat, ue_lon)
-        else:
-            intf_sector_off = 0.0
-
-        p_rx_j_dbm = (bs_intf.p_tx_dbm + bs_intf.g_tx_dbi + intf_sector_off + g_rx_ue_dbi
+        p_rx_j_dbm = (bs_intf.p_tx_dbm + bs_intf.g_tx_dbi + g_rx_ue_dbi
                       - interferer_beamforming_suppression_db
                       - pl_j_db)
         i_mw += 10.0 ** (p_rx_j_dbm / 10.0)
@@ -537,7 +496,7 @@ def calculate_tn_sinr_capacity(
 
     spectral_efficiency = implementation_loss_factor * math.log2(1.0 + sinr_linear)
     throughput_mbps     = bandwidth_hz * spectral_efficiency / 1e6
-
+    
     # --- Diagnostic components (dBm) so callers can see WHY sinr is high/low ---
     s_dbm_out = 10.0 * math.log10(s_mw)
     i_dbm_out = (10.0 * math.log10(i_mw)) if i_mw > 0.0 else float('-inf')
