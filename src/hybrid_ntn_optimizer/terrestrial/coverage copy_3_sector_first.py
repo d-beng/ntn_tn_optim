@@ -6,22 +6,10 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 from sklearn.cluster import KMeans, MiniBatchKMeans
 from omegaconf import DictConfig, OmegaConf
+import h3
+from threadpoolctl import threadpool_limits
 
-try:
-    import h3
-except Exception:  # pragma: no cover
-    h3 = None
-
-try:
-    from threadpoolctl import threadpool_limits
-except Exception:  # pragma: no cover
-    threadpool_limits = None
-
-try:
-    from scipy.spatial import ConvexHull, cKDTree
-except Exception:  # pragma: no cover
-    ConvexHull = None
-    cKDTree = None
+from scipy.spatial import ConvexHull, cKDTree
 
 from hybrid_ntn_optimizer.models.user import User
 from hybrid_ntn_optimizer.models.base_station import BaseStation, DeploymentScenario
@@ -403,126 +391,6 @@ def _representative_positions(users, cfg, region_res):
 # ----------------------------------------------------------------------
 # Main entry
 # ----------------------------------------------------------------------
-
-# ----------------------------------------------------------------------
-# CAPACITY-CAPPED BACKFILL (couples TN placement to NTN beam capacity)
-# For every NTN beam-cell (H3 at the beam-grid resolution), the users left
-# UNCOVERED by TN must not exceed what ONE LEO beam can serve:
-#     cap_users = beams_per_cell * (ntn_bw_hz * ntn_se / 1e6) / mbps_per_user
-# If a cell's uncovered count is above the cap, RMa towers are added over its
-# uncovered users (hex nodes, biggest catch first) until the residual fits in
-# a single beam. TN therefore stops exactly where NTN capacity begins, and no
-# beam-cell is ever handed more spillover than the beam can carry (in
-# expectation over the representative positions).
-# Config (terrestrial.ntn_cap.*): beams_per_cell(1), bandwidth_hz(300e6),
-#   spectral_eff(1.77), mbps_per_user(0.385).
-# ----------------------------------------------------------------------
-def _capacity_capped_backfill(all_coords, candidates, bs_cfg, cfg,
-                              beam_res, mean_demand_mbps, density_map=None):
-    # ALL VALUES READ FROM YOUR EXISTING CONFIG / OBJECTS — no parallel knobs.
-    #  - beam bandwidth: the SAME key the beam allocator reads
-    #    (cfg.constellation.bandwidth_hz), so the cap is always consistent
-    #    with what a beam actually has.
-    #  - beams per cell: your allocator model is strict one-beam-per-cell.
-    #  - spectral efficiency: from the allocator's own link parameters via a
-    #    representative served SINR; overridable at cfg.constellation
-    #    (spectral_eff) if you log a measured value.
-    #  - per-user demand: measured from the ACTUAL users' busy-hour demand
-    #    (mean of get_demand_at_time at the simulated peak hour), not a config
-    #    constant — passed in by the caller as mean_demand_mbps.
-    bw    = float(_cfg_get(cfg, "constellation.bandwidth_hz", 40e6))
-    beams = 1.0   # strict one-beam-per-cell (locked model)
-    se_cfg = _cfg_get(cfg, "constellation.spectral_eff", None)
-    if se_cfg is not None:
-        se = float(se_cfg)
-    else:
-        # representative served NTN SINR: a few dB above the NTN admission
-        # floor (cfg.constellation.sinr_min_db); implementation loss 0.65 as
-        # in the link-budget module.
-        sinr_floor = float(_cfg_get(cfg, "constellation.sinr_min_db", 0.0))
-        rep_sinr_db = sinr_floor + 7.5   # matches the measured served median
-        se = 0.65 * math.log2(1.0 + 10.0 ** (rep_sinr_db / 10.0))
-    mpu = max(float(mean_demand_mbps), 1e-6)
-    cap_users = beams * (bw * se / 1e6) / mpu
-
-    uncovered_idx = _find_uncovered_users(all_coords, candidates, cfg)
-    if len(uncovered_idx) == 0:
-        print("   Capacity cap: nothing uncovered.", flush=True)
-        return []
-    pts_all = all_coords[uncovered_idx].astype(np.float64)
-
-    # group uncovered users by NTN beam-cell
-    latlng = h3.latlng_to_cell
-    cell_members = {}
-    for i, (la, lo) in enumerate(pts_all):
-        c = latlng(float(la), float(lo), beam_res)
-        cell_members.setdefault(c, []).append(i)
-
-    rma_r   = float(bs_cfg["RMA"]["coverage_radius_km"])
-    packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
-    d       = rma_r * math.sqrt(3.0) * packing
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
-    R = 6371.0088
-
-    out = []
-    n_over_cells = 0
-    n_rescued = 0
-    for c, idxs in cell_members.items():
-        overflow = len(idxs) - cap_users
-        if overflow <= 0:
-            continue           # one beam can already carry this cell's leftovers
-        n_over_cells += 1
-        sub = pts_all[np.asarray(idxs)]
-
-        # local km plane for this cell
-        lat0 = math.radians(float(sub[:, 0].mean()))
-        x = np.radians(sub[:, 1]) * math.cos(lat0) * R
-        y = np.radians(sub[:, 0]) * R
-
-        dx = d
-        dy = d * math.sqrt(3.0) / 2.0
-        x0, y0 = x.min(), y.min()
-        row = np.round((y - y0) / dy).astype(np.int64)
-        col = np.round((x - x0 - (row & 1) * (dx * 0.5)) / dx).astype(np.int64)
-        node_x = x0 + col * dx + (row & 1) * (dx * 0.5)
-        node_y = y0 + row * dy
-        keys = row * 1_000_003 + col
-        order = np.argsort(keys, kind="stable")
-        ks = keys[order]
-        cut = np.where(np.diff(ks) != 0)[0] + 1
-        groups = sorted(np.split(order, cut), key=len, reverse=True)
-
-        # add towers (biggest catch first) until residual <= cap
-        covered_here = 0
-        for g in groups:
-            if len(idxs) - covered_here <= cap_users:
-                break
-            nx, ny = float(node_x[g[0]]), float(node_y[g[0]])
-            clat = math.degrees(ny / R)
-            clon = math.degrees(nx / (R * math.cos(lat0)))
-            dcell = latlng(clat, clon, dens_res)
-            real_dens = float(density_map.get(dcell, 0.0)) if density_map else 0.0
-            out.append({
-                "lat": clat, "lon": clon,
-                "raw_radius_km": rma_r, "density": real_dens,
-                "assigned_user_count": int(len(g)),
-                "membership_boundary": _make_radius_boundary((clat, clon), rma_r, 24),
-                "zone_radius_km": rma_r, "zone_size": int(len(g)),
-                "scenario_key": "RMA",
-                "coverage_radius_km": rma_r,
-            })
-            covered_here += len(g)
-        n_rescued += covered_here
-
-    print(f"   Capacity cap [bw={bw/1e6:.0f} MHz (cfg.constellation), "
-          f"se={se:.2f} bps/Hz, demand={mpu:.3f} Mbps/user (measured)]: "
-          f"one-beam capacity = {cap_users:.0f} users/cell; "
-          f"{n_over_cells:,} beam-cells overflowed -> {len(out):,} RMa towers "
-          f"added, {n_rescued:,} users pulled onto TN so residual/cell <= cap.",
-          flush=True)
-    return out
-
-
 def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resolution: int) -> List[BaseStation]:
     """
     Two-pass parallel TN placement, with scenario classification from
@@ -670,16 +538,6 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
                                  random_seed, density_map=density_map)
         candidates.extend(rma_fill)
 
-        # SECOND PASS — capacity coupling: whatever is STILL uncovered must fit
-        # within one NTN beam per beam-cell; add RMa where a cell overflows.
-        # measure the real per-user busy-hour demand from the users themselves
-        _sample = users[:: max(1, len(users) // 100_000)]   # ~100k sample
-        _mean_demand = float(np.mean([u.get_demand_at_time(20.0) for u in _sample]))
-        cap_fill = _capacity_capped_backfill(all_coords, candidates, bs_cfg,
-                                             cfg, h3_resolution, _mean_demand,
-                                             density_map=density_map)
-        candidates.extend(cap_fill)
-
     # ------------------------------------------------------------------
     # Build BaseStation objects (unchanged construction)
     # ------------------------------------------------------------------
@@ -731,6 +589,7 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
             # --- sector metadata (consumed by full_pipeline attachment + sinr) ---
             bs.site_id = int(site_id)               # co-located sectors share this
             bs.sector_azimuth_deg = az              # boresight; None => omni (UMi)
+            bs.num_sectors = int(n_sec)
 
             bs.voronoi_boundary = c["membership_boundary"]
             bs.coverage_boundary = coverage_boundary
