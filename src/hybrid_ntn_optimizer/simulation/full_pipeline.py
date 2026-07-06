@@ -129,8 +129,10 @@ def _evaluate_attachment(user_pos):
         for other in intf_cells:
             if other.bs_id == bs.bs_id:
                 continue
+            ''''
             if getattr(other, "site_id", -1) == serving_site:
                 continue
+            '''
             dist = haversine_distance(u_lat, u_lon, other.lat, other.lon)
             if dist <= other.interference_cutoff_m:
                 dist = max(dist, other.min_user_dist_m)
@@ -431,6 +433,58 @@ def run_daily_mobility_simulation(
                         "served_Mbps": round(a["served_Mbps"], 2),
                     })
                 pd.DataFrame(site_rows).to_csv("site_utilisation.csv", index=False)
+
+                # ---- SE / SINR MEDIANS (per tier, and per beam-cell) ----
+                # Validates that densification did not wreck SINR: if median SE
+                # or SINR collapsed vs baseline, the added capacity was fake.
+                served_tn = [u for u in users if getattr(u, "coverage_type", "") == "TN"]
+                def _med(vals):
+                    a = np.asarray([v for v in vals if v is not None and not (isinstance(v,float) and math.isnan(v))])
+                    return float(np.median(a)) if len(a) else float("nan")
+                # per-tier via serving BS scenario
+                tier_of = {}
+                for bs in base_stations:
+                    tier_of[bs.bs_id] = bs.scenario.name
+                by_tier = {"UMI": {"se": [], "sinr": []},
+                           "UMA": {"se": [], "sinr": []},
+                           "RMA": {"se": [], "sinr": []}}
+                for u in served_tn:
+                    bid = None
+                    ev = getattr(u, "tn_eval_bs", "")
+                    if isinstance(ev, str) and ev.startswith("BS_"):
+                        try: bid = int(ev[3:])
+                        except: bid = None
+                    t = tier_of.get(bid)
+                    if t in by_tier:
+                        by_tier[t]["se"].append(getattr(u, "spectral_efficiency", float("nan")))
+                        by_tier[t]["sinr"].append(getattr(u, "tn_sinr_db", float("nan")))
+                print("   [se/sinr] served-TN medians by tier:")
+                for t in ["UMI", "UMA", "RMA"]:
+                    n = len(by_tier[t]["se"])
+                    print(f"        {t}: n={n:>9,}  SE={_med(by_tier[t]['se']):5.2f} bps/Hz  "
+                          f"SINR={_med(by_tier[t]['sinr']):6.1f} dB", flush=True)
+                glob_se = _med([getattr(u,'spectral_efficiency',float('nan')) for u in served_tn])
+                glob_sinr = _med([getattr(u,'tn_sinr_db',float('nan')) for u in served_tn])
+                print(f"        ALL: n={len(served_tn):>9,}  SE={glob_se:5.2f} bps/Hz  "
+                      f"SINR={glob_sinr:6.1f} dB", flush=True)
+
+                # per-beam-cell medians (dense cells only) -> CSV
+                cell_se = {}
+                for u in served_tn:
+                    h = getattr(u, "current_h3_id", None)
+                    if h is None: continue
+                    cell_se.setdefault(h, {"se": [], "sinr": [], "n": 0})
+                    cell_se[h]["se"].append(getattr(u,"spectral_efficiency",float("nan")))
+                    cell_se[h]["sinr"].append(getattr(u,"tn_sinr_db",float("nan")))
+                    cell_se[h]["n"] += 1
+                cell_rows_se = [{"h3_id": h,
+                                 "served_users": d["n"],
+                                 "median_SE_bps_hz": round(_med(d["se"]), 3),
+                                 "median_SINR_dB": round(_med(d["sinr"]), 2)}
+                                for h, d in cell_se.items()]
+                pd.DataFrame(cell_rows_se).sort_values("served_users", ascending=False)\
+                    .to_csv("cell_se_sinr.csv", index=False)
+                print(f"   [se/sinr] wrote cell_se_sinr.csv ({len(cell_rows_se):,} cells).", flush=True)
                 _n_full = sum(1 for r in bs_rows if r["util_pct"] >= 99.0)
                 print(f"   [util] wrote bs_sector_utilisation.csv ({len(bs_rows):,} cells) "
                       f"and site_utilisation.csv ({len(site_rows):,} sites); "
