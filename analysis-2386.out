@@ -1,0 +1,148 @@
+Loaded 11,635,918 rows.
+Filtered to hour 20.0: 11,635,918 rows.
+
+Total demand in log: 5.631 Tbps over 11,635,918 active users
+
+=== FINAL STATE ===
+  TN          users=10,023,442  demand=  4.851 Tbps  ( 86.2% of demand)
+  DROPPED     users= 1,410,482  demand=  0.682 Tbps  ( 12.1% of demand)
+  LEO         users=   201,994  demand=  0.097 Tbps  (  1.7% of demand)
+
+=== DROP ROOT CAUSE  (1,410,482 dropped users, 0.682 Tbps) ===
+  [ 43.2%]   609,565 users  demand= 0.295 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Beam Congested (Empty)
+  [  8.9%]   125,514 users  demand= 0.061 Tbps
+            TN : 5G Bandwidth too low for QoS (Req: 0.0 MHz)
+            NTN: NTN Beam Congested (Empty)
+  [  5.8%]    81,817 users  demand= 0.040 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.058 MHz)
+  [  4.8%]    68,108 users  demand= 0.033 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.059 MHz)
+  [  4.0%]    55,875 users  demand= 0.027 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.060 MHz)
+  [  2.7%]    37,851 users  demand= 0.018 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.057 MHz)
+  [  2.5%]    35,045 users  demand= 0.017 Tbps
+            TN : No 5G Tower in Geographic Range
+            NTN: NTN Beam Congested (Empty)
+  [  2.2%]    30,268 users  demand= 0.015 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.056 MHz)
+  [  2.0%]    28,706 users  demand= 0.014 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.061 MHz)
+  [  1.9%]    27,180 users  demand= 0.013 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.062 MHz)
+  [  1.3%]    18,308 users  demand= 0.009 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.087 MHz)
+  [  1.2%]    16,707 users  demand= 0.008 Tbps
+            TN : 5G Congestion (Tower Empty)
+            NTN: NTN Bandwidth too low for QoS (Req: 0.086 MHz)
+
+=== DROPS BY REGION (split at Lat 46.0) ===
+
+  SOUTH (Lat <  46.0): 11,031,277 users  demand=5.338 Tbps  served=4.661  dropped=0.677 Tbps ( 12.7% dropped)
+    TN reason among dropped:
+       79.1%  1,108,576  5G Congestion (Tower Empty)
+       14.5%    202,606  5G Bandwidth too low for QoS (Req: 0.0 MHz)
+        4.4%     61,903  No 5G Tower in Geographic Range
+        1.3%     18,972  5G Bandwidth too low for QoS (Req: 0.1 MHz)
+    NTN reason among dropped:
+       55.8%    780,954  NTN Beam Congested (Empty)
+        6.4%     89,907  NTN Bandwidth too low for QoS (Req: 0.058 MHz)
+        5.7%     80,273  NTN Bandwidth too low for QoS (Req: 0.059 MHz)
+        4.9%     68,657  NTN Bandwidth too low for QoS (Req: 0.060 MHz)
+
+  NORTH (Lat >= 46.0): 604,641 users  demand=0.292 Tbps  served=0.288  dropped=0.005 Tbps (  1.6% dropped)
+    TN reason among dropped:
+       65.6%      6,225  5G Congestion (Tower Empty)
+       23.4%      2,291  5G Bandwidth too low for QoS (Req: 0.0 MHz)
+        4.6%        464  No 5G Tower in Geographic Range
+        4.5%        413  5G Bandwidth too low for QoS (Req: 0.1 MHz)
+    NTN reason among dropped:
+       79.4%      7,558  NTN Beam Congested (Empty)
+        9.1%        889  NTN Bandwidth too low for QoS (Req: 0.056 MHz)
+        6.6%        653  NTN Bandwidth too low for QoS (Req: 0.055 MHz)
+        3.0%        287  NTN Bandwidth too low for QoS (Req: 0.057 MHz)
+
+=== TN_REASON tally (all users) ===
+  10,019,103  Fully Served
+   1,262,662  5G Congestion (Tower Empty)
+     238,539  5G Bandwidth too low for QoS (Req: 0.0 MHz)
+      75,217  No 5G Tower in Geographic Range
+      24,368  5G Bandwidth too low for QoS (Req: 0.1 MHz)
+       4,339  Partially Served (Congested)
+       3,278  5G Bandwidth too low for QoS (Req: 0.2 MHz)
+       1,480  5G Bandwidth too low for QoS (Req: 0.3 MHz)
+         476  5G Bandwidth too low for QoS (Req: 0.4 MHz)
+         191  5G SINR too low (-5.1 dB)
+
+=== NTN_REASON tally (all users) ===
+     788,546  NTN Beam Congested (Empty)
+     201,914  Fully Served
+      89,945  NTN Bandwidth too low for QoS (Req: 0.058 MHz)
+      80,273  NTN Bandwidth too low for QoS (Req: 0.059 MHz)
+      68,657  NTN Bandwidth too low for QoS (Req: 0.060 MHz)
+      45,160  NTN Bandwidth too low for QoS (Req: 0.057 MHz)
+      36,223  NTN Bandwidth too low for QoS (Req: 0.061 MHz)
+      35,023  NTN Bandwidth too low for QoS (Req: 0.056 MHz)
+      33,446  NTN Bandwidth too low for QoS (Req: 0.062 MHz)
+      27,970  NTN Bandwidth too low for QoS (Req: 0.086 MHz)
+
+=== SINR DISTRIBUTIONS (served + evaluated users) ===
+  TN  SINR (all evaluated): n=11,560,701  mean= 32.85 dB  median= 32.16  p5=  7.36  p95= 60.29  min=-27.12  max=121.75
+      below floor (-3.0 dB): 51,676 (0.45%)   p1=-0.86  p99=73.46
+  TN  SINR (served only) : n=10,023,442  mean= 34.72 dB  median= 34.67  p5=  8.11  p95= 61.55  min= -5.00  max=121.75
+      below floor (-3.0 dB): 37,077 (0.37%)   p1=-0.50  p99=74.44
+  NTN SINR (all evaluated): n=1,612,476  mean=  6.33 dB  median=  7.01  p5=  2.54  p95=  8.49  min= -0.70  max= 13.54
+      below floor (+0.0 dB): 2,574 (0.16%)   p1=0.23  p99=11.50
+  NTN SINR (served only) : n=201,994  mean=  8.00 dB  median=  7.94  p5=  3.63  p95= 11.86  min=  0.11  max= 13.54
+      below floor (+0.0 dB): 0 (0.00%)   p1=1.71  p99=12.41
+
+=== LOW-SINR USERS by final state ===
+  TN  SINR < -3.0 dB : 51,676 users
+        TN      : 37,077
+        DROPPED : 11,255
+        LEO     : 3,344
+  NTN SINR < +0.0 dB : 2,574 users
+        DROPPED : 2,574
+
+Saved SINR histograms to sinr_distributions.png
+
+=== TN SINR COMPONENTS (served TN users) ===
+  Signal  S     : median=  -36.59 dBm  p5=  -59.40  p95=   -4.49  mean=  -35.48
+  Interf. I     : median=  -73.48 dBm  p5=  -82.88  p95=  -57.52  mean=  -72.23
+  Noise   N     : median=  -87.00 dBm  p5=  -93.99  p95=  -87.00  mean=  -89.71
+  I/N ratio     : median=   15.91 dB  p5=    5.13  p95=   34.95  mean=   17.48
+  interferers   : median=363  mean=331.9  max=609  zero=1,056 users
+  --> INTERFERENCE-LIMITED: median I/N = +15.9 dB, 0% of users have I < N.
+      Interference dominates noise, yet check if SINR is still high:
+      if so, the serving-signal term (power+gains) is too strong.
+
+=== TOP 15 BUSIEST TOWERS (by served demand) ===
+      BS_16459  users=   1,829  served=    914.8 Mbps
+      BS_17074  users=   1,847  served=    910.3 Mbps
+      BS_26341  users=   1,873  served=    904.4 Mbps
+      BS_17299  users=   1,881  served=    902.9 Mbps
+      BS_13021  users=   1,780  served=    886.8 Mbps
+      BS_14704  users=   1,930  served=    886.3 Mbps
+      BS_15931  users=   1,752  served=    877.9 Mbps
+      BS_11196  users=   1,796  served=    871.9 Mbps
+      BS_23572  users=   1,767  served=    865.6 Mbps
+      BS_16168  users=   1,738  served=    864.5 Mbps
+      BS_19362  users=   1,802  served=    858.9 Mbps
+      BS_20899  users=   1,745  served=    856.0 Mbps
+      BS_26167  users=   1,809  served=    853.0 Mbps
+      BS_22611  users=   1,711  served=    849.8 Mbps
+      BS_12850  users=   1,738  served=    847.2 Mbps
+  map: 0 true coverage-hole drops, 1,410,482 congestion drops
+
+Saved map to drop_analysis.png
+Done. See the printed breakdown above and drop_analysis.png.
