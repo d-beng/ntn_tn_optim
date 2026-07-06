@@ -417,6 +417,87 @@ def _representative_positions(users, cfg, region_res):
 # Config (terrestrial.ntn_cap.*): beams_per_cell(1), bandwidth_hz(300e6),
 #   spectral_eff(1.77), mbps_per_user(0.385).
 # ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# URBAN RMa UNDERLAY (low-band coverage blanket beneath the small-cell core)
+# Measured finding: in dense (UMI-classified) zones, "No TN Coverage" drops
+# sit 85-200 m outside the nearest UMi edge (the inter-UMi slivers) and
+# >600 m outside any RMa -- because tier-claiming removed RMa from urban
+# cores, nothing blankets the slivers at sim time. Since RMa is 700 MHz and
+# UMi is 3.5 GHz (different carriers, no co-channel interference), an RMa
+# underlay beneath the UMi carpet is interference-free and mirrors real
+# operator practice (low-band coverage layer under mid-band capacity layer).
+# This pass lays a plain hex grid of RMa over ALL dense-core positions
+# (covered or not), skipping nodes that already have an RMa nearby.
+# Config: terrestrial.urban_rma_underlay (default True).
+# ----------------------------------------------------------------------
+def _urban_rma_underlay(all_coords, pos_density, candidates, bs_cfg, cfg,
+                        density_map=None):
+    if not bool(_cfg_get(cfg, "terrestrial.urban_rma_underlay", True)):
+        return []
+    umi_min = float(_cfg_get(cfg, "terrestrial.density_umi", 1000.0))
+    dense_m = pos_density >= umi_min
+    if dense_m.sum() == 0:
+        return []
+    pts = all_coords[dense_m].astype(np.float64)
+
+    rma_r   = float(bs_cfg["RMA"]["coverage_radius_km"])
+    packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
+    d = rma_r * math.sqrt(3.0) * packing
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    R = 6371.0088
+    lat0 = math.radians(float(pts[:, 0].mean()))
+    x = np.radians(pts[:, 1]) * math.cos(lat0) * R
+    y = np.radians(pts[:, 0]) * R
+
+    dx = d; dy = d * math.sqrt(3.0) / 2.0
+    x0, y0 = x.min(), y.min()
+    row = np.round((y - y0) / dy).astype(np.int64)
+    col = np.round((x - x0 - (row & 1) * (dx * 0.5)) / dx).astype(np.int64)
+    node_x = x0 + col * dx + (row & 1) * (dx * 0.5)
+    node_y = y0 + row * dy
+    keys = row * 1_000_003 + col
+    order = np.argsort(keys, kind="stable")
+    ks = keys[order]
+    cut = np.where(np.diff(ks) != 0)[0] + 1
+    groups = np.split(order, cut)
+
+    # existing RMa candidates (skip nodes already blanketed)
+    ex = [(c["lat"], c["lon"]) for c in candidates if c.get("scenario_key") == "RMA"]
+    ex_tree = None
+    if ex and cKDTree is not None:
+        ex_pts = np.asarray(ex)
+        ex_x = np.radians(ex_pts[:, 1]) * math.cos(lat0) * R
+        ex_y = np.radians(ex_pts[:, 0]) * R
+        ex_tree = cKDTree(np.column_stack([ex_x, ex_y]))
+
+    latlng = h3.latlng_to_cell
+    out = []
+    for g in groups:
+        nx, ny = float(node_x[g[0]]), float(node_y[g[0]])
+        if ex_tree is not None:
+            dd, _ = ex_tree.query([nx, ny], k=1)
+            if dd <= rma_r * 0.8:      # an RMa already blankets this node
+                continue
+        clat = math.degrees(ny / R)
+        clon = math.degrees(nx / (R * math.cos(lat0)))
+        dcell = latlng(clat, clon, dens_res)
+        out.append({
+            "lat": clat, "lon": clon,
+            "raw_radius_km": rma_r,
+            "density": float(density_map.get(dcell, 0.0)) if density_map else 0.0,
+            "assigned_user_count": int(len(g)),
+            "membership_boundary": _make_radius_boundary((clat, clon), rma_r, 24),
+            "zone_radius_km": rma_r, "zone_size": int(len(g)),
+            "scenario_key": "RMA",
+            "coverage_radius_km": rma_r,
+        })
+    print(f"   Urban RMa underlay (700 MHz blanket under 3.5 GHz small cells): "
+          f"{len(out):,} RMa added over the dense core "
+          f"(closes 85-200 m inter-UMi slivers; no co-channel cost).", flush=True)
+    return out
+
+
 def _capacity_capped_backfill(all_coords, candidates, bs_cfg, cfg,
                               beam_res, mean_demand_mbps, density_map=None):
     # ALL VALUES READ FROM YOUR EXISTING CONFIG / OBJECTS — no parallel knobs.
@@ -680,6 +761,16 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
                                              density_map=density_map)
         candidates.extend(cap_fill)
 
+        # THIRD PASS — urban RMa underlay: 700 MHz blanket beneath the dense
+        # 3.5 GHz small-cell core, closing the 85-200 m inter-UMi slivers that
+        # stochastic users land in (measured from the hour-20 drop map).
+        _latlng = h3.latlng_to_cell
+        pos_density = np.array([density_map.get(_latlng(float(la), float(lo), dens_res), 0.0)
+                                for la, lo in all_coords])
+        under_fill = _urban_rma_underlay(all_coords, pos_density, candidates,
+                                         bs_cfg, cfg, density_map=density_map)
+        candidates.extend(under_fill)
+
     # ------------------------------------------------------------------
     # Build BaseStation objects (unchanged construction)
     # ------------------------------------------------------------------
@@ -696,7 +787,8 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
     # (default 1). Set sectors_per_macro=1 to disable and recover omni behaviour.
     # ------------------------------------------------------------------
     sectors_per_macro = int(_cfg_get(cfg, "terrestrial.sectors_per_macro", 3))
-    umi_sectors = int(_cfg_get(cfg, "terrestrial.umi_sectors", 1))
+    umi_sectors = int(_cfg_get(cfg, "terrestrial.umi_sectors", 3))  # 3GPP UMi
+    #   calibration layout is 3 sectors/site; set to 1 in config for omni.
 
     base_stations: List[BaseStation] = []
     bs_id_counter = 0
@@ -713,7 +805,10 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
         if n_sec == 1:
             azimuths = [None]
         else:
-            azimuths = [(360.0 / n_sec) * k for k in range(n_sec)]
+            # 3GPP TR 38.901 calibration azimuths: for a 3-sector site the
+            # boresights are 30/150/270 deg (30 deg offset from the hex axes).
+            offset = 30.0 if n_sec == 3 else 0.0
+            azimuths = [(360.0 / n_sec) * k + offset for k in range(n_sec)]
         # users split across sectors -> per-sector expected load ~ 1/n_sec
         per_sector_users = int(round(c["assigned_user_count"] / n_sec))
 

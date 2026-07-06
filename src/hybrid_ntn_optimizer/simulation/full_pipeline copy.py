@@ -21,10 +21,7 @@ from hybrid_ntn_optimizer.link_budget.sector_antenna import (
     sector_gain_db, in_sector,
 )
 
-try:
-    from scipy.spatial import cKDTree
-except Exception:  # pragma: no cover
-    cKDTree = None
+from scipy.spatial import cKDTree
 
 
 # ======================================================================
@@ -57,7 +54,6 @@ _CELL_XY = None
 _LAT0 = 0.0
 _MAX_COV_R_KM = 0.0
 _MAX_INTF_CUTOFF_M = 0.0
-_TOPK = 6          # candidate cells returned per user (capacity-aware attach)
 _R_EARTH_KM = 6371.0088
 
 
@@ -91,14 +87,19 @@ def _evaluate_attachment(user_pos):
     Output: (best_bs_id, best_sinr, best_spec_eff, best_diag)
     """
     u_lat, u_lon = user_pos
-    candidates_out = []
+    best_bs_id = None
+    best_sinr = -999.0
+    best_spec_eff = 0.0
+    best_diag = {"S_dBm": float('nan'), "I_dBm": float('nan'),
+                 "N_dBm": float('nan'), "num_interferers": 0,
+                 "IoverN_dB": float('nan')}
 
     # --- SPATIAL PREFILTER: candidate serving cells + candidate interferers ---
     if _KD is not None:
         ux, uy = _project_km(u_lat, u_lon, _LAT0)
         serving_idx = _KD.query_ball_point((ux, uy), _MAX_COV_R_KM)
         if not serving_idx:
-            return []
+            return (None, best_sinr, best_spec_eff, best_diag)
         intf_idx = _KD.query_ball_point((ux, uy), _MAX_INTF_CUTOFF_M / 1000.0)
         intf_cells = [_BASE_STATIONS[i] for i in intf_idx]
     else:
@@ -152,14 +153,13 @@ def _evaluate_attachment(user_pos):
             ue_lon=u_lon,
         )
 
-        candidates_out.append((sinr_db, spec_eff, bs.bs_id, diag))
+        if sinr_db > best_sinr:
+            best_sinr = sinr_db
+            best_spec_eff = spec_eff
+            best_bs_id = bs.bs_id
+            best_diag = diag
 
-    if not candidates_out:
-        return []
-    # return top-K by SINR so the main process can pick the best cell that
-    # still has bandwidth (capacity-aware attachment / load balancing).
-    candidates_out.sort(key=lambda t: t[0], reverse=True)
-    return candidates_out[:_TOPK]
+    return (best_bs_id, best_sinr, best_spec_eff, best_diag)
 
 
 def run_daily_mobility_simulation(
@@ -203,21 +203,6 @@ def run_daily_mobility_simulation(
     beam_animation_data = []
     user_animation_data = []
     detailed_drop_log = []
-
-    # Save base station inventory once so visualisation scripts can read it
-    # without re-running placement (lightweight, written once per job).
-    if base_stations:
-        import pandas as _pd
-        _pd.DataFrame([{
-            "bs_id": bs.bs_id,
-            "site_id": getattr(bs, "site_id", bs.bs_id),
-            "lat": bs.lat,
-            "lon": bs.lon,
-            "scenario": bs.scenario.name,
-            "coverage_radius_km": bs.coverage_radius_km,
-            "sector_azimuth_deg": getattr(bs, "sector_azimuth_deg", None),
-        } for bs in base_stations]).to_csv("base_stations.csv", index=False)
-        print(f"\U0001f4be Saved {len(base_stations):,} base stations to base_stations.csv")
 
     print("\U0001f4c1 Initializing chunked CSV log files...")
     pd.DataFrame(columns=["Hour", "Hour_of_Day", "User_ID", "Lat", "Lon", "State"]).to_csv("user_hourly_states.csv", index=False)
@@ -283,55 +268,23 @@ def run_daily_mobility_simulation(
                 else:
                     results = map(_evaluate_attachment, payload)
 
-                # running reserved bandwidth per BS for capacity-aware attach
-                reserved_hz = {bs.bs_id: 0.0 for bs in base_stations}
-                for u, cand_list in zip(active_users, results):
-                    if not cand_list:
+                for u, (best_bs_id, best_sinr, best_spec_eff, best_diag) in zip(active_users, results):
+                    u.tn_S_dbm = best_diag["S_dBm"]
+                    u.tn_I_dbm = best_diag["I_dBm"]
+                    u.tn_N_dbm = best_diag["N_dBm"]
+                    u.tn_num_interferers = best_diag["num_interferers"]
+                    u.tn_IoverN_db = best_diag["IoverN_dB"]
+                    if best_bs_id is not None and best_sinr >= sinr_min_tn:
+                        u.tn_sinr_db = best_sinr
+                        u.spectral_efficiency = best_spec_eff
+                        u.tn_eval_bs = f"BS_{best_bs_id}"
+                        bs_by_id[best_bs_id].attached_users.append(u)
+                    elif best_bs_id is not None:
+                        u.tn_sinr_db = best_sinr
+                        u.tn_reason = f"5G SINR too low ({best_sinr:.1f} dB)"
+                        u.tn_eval_bs = f"BS_{best_bs_id}"
+                    else:
                         u.tn_reason = "No 5G Tower in Geographic Range"
-                        continue
-                    # diagnostics from the BEST-SINR candidate (for logging)
-                    b_sinr, b_se, b_id, b_diag = cand_list[0]
-                    u.tn_S_dbm = b_diag["S_dBm"]; u.tn_I_dbm = b_diag["I_dBm"]
-                    u.tn_N_dbm = b_diag["N_dBm"]
-                    u.tn_num_interferers = b_diag["num_interferers"]
-                    u.tn_IoverN_db = b_diag["IoverN_dB"]
-
-                    # CAPACITY-AWARE ATTACH: among candidates above the SINR
-                    # floor, pick the best-SINR cell that still has room for this
-                    # user's demand; fall back to best-SINR cell if all are full
-                    # (so the drop is correctly attributed to congestion, not
-                    # coverage). This spreads load across sectors/towers instead
-                    # of piling everyone onto the single peak-SINR cell.
-                    chosen = None
-                    for (sinr_db, spec_eff, bs_id, diag) in cand_list:
-                        if sinr_db < sinr_min_tn:
-                            continue
-                        bs = bs_by_id[bs_id]
-                        need_hz = (u.current_demand * 1e6) / max(spec_eff, 1e-6)
-                        if reserved_hz[bs_id] + need_hz <= bs.total_bandwidth_hz:
-                            chosen = (sinr_db, spec_eff, bs_id, need_hz)
-                            break
-                    if chosen is None:
-                        # all reachable cells above floor are full -> attach to
-                        # best-SINR one anyway; PHASE 2 will mark it congested.
-                        above = [c for c in cand_list if c[0] >= sinr_min_tn]
-                        if above:
-                            sinr_db, spec_eff, bs_id, _ = above[0]
-                            chosen = (sinr_db, spec_eff, bs_id,
-                                      (u.current_demand * 1e6) / max(spec_eff, 1e-6))
-                    if chosen is None:
-                        # nothing above SINR floor
-                        u.tn_sinr_db = b_sinr
-                        u.tn_reason = f"5G SINR too low ({b_sinr:.1f} dB)"
-                        u.tn_eval_bs = f"BS_{b_id}"
-                        continue
-
-                    sinr_db, spec_eff, bs_id, need_hz = chosen
-                    u.tn_sinr_db = sinr_db
-                    u.spectral_efficiency = spec_eff
-                    u.tn_eval_bs = f"BS_{bs_id}"
-                    reserved_hz[bs_id] += need_hz
-                    bs_by_id[bs_id].attached_users.append(u)
 
             # ==================================================
             # PHASE 2: MAC SCHEDULING
@@ -346,18 +299,12 @@ def run_daily_mobility_simulation(
 
                 bs.attached_users.sort(key=lambda x: x.pf_score, reverse=True)
 
-                queue_cut = False
                 for u in bs.attached_users:
                     u.tn_eval_hz = bs.remaining_bandwidth_hz
 
-                    if bs.remaining_bandwidth_hz <= 0 or queue_cut:
-                        # Label EVERY remaining queued user (the old `break`
-                        # left them as "N/A" -> they showed up as unexplained
-                        # "Other" drops). They still spill to NTN as before.
+                    if bs.remaining_bandwidth_hz <= 0:
                         u.tn_reason = "5G Congestion (Tower Empty)"
-                        u.locked_to_tn = False
-                        queue_cut = True
-                        continue
+                        break
 
                     required_hz = (u.current_demand * 1e6) / u.spectral_efficiency
                     min_qos_hz = (getattr(u, 'qos_min_mbps', 0.1) * 1e6) / u.spectral_efficiency
@@ -383,61 +330,6 @@ def run_daily_mobility_simulation(
                     total_served_tn += u.served_mbps
                     u.historical_avg_mbps = (0.8 * getattr(u, 'historical_avg_mbps', 0.1)) + (0.2 * u.served_mbps)
 
-            # ---- PER-BASE-STATION / PER-SECTOR UTILISATION LOG ----
-            # One row per sector cell + rollup per physical site, at hour 20.
-            if abs(hour_of_day - 20.0) < 0.01:
-                bs_rows = []
-                site_agg = {}
-                for bs in base_stations:
-                    used_hz  = bs.total_bandwidth_hz - bs.remaining_bandwidth_hz
-                    served   = sum(getattr(u, "served_mbps", 0.0) for u in bs.attached_users)
-                    demand   = sum(u.current_demand for u in bs.attached_users)
-                    util_pct = 100.0 * used_hz / max(bs.total_bandwidth_hz, 1.0)
-                    bs_rows.append({
-                        "site_id": getattr(bs, "site_id", bs.bs_id),
-                        "bs_id": bs.bs_id,
-                        "scenario": bs.scenario.name,
-                        "sector_az_deg": getattr(bs, "sector_azimuth_deg", None),
-                        "lat": round(bs.lat, 5), "lon": round(bs.lon, 5),
-                        "total_MHz": round(bs.total_bandwidth_hz / 1e6, 2),
-                        "used_MHz": round(used_hz / 1e6, 3),
-                        "util_pct": round(util_pct, 1),
-                        "attached_users": len(bs.attached_users),
-                        "demand_Mbps": round(demand, 2),
-                        "served_Mbps": round(served, 2),
-                    })
-                    sid = getattr(bs, "site_id", bs.bs_id)
-                    a = site_agg.setdefault(sid, {"scenario": bs.scenario.name,
-                        "lat": bs.lat, "lon": bs.lon, "sectors": 0,
-                        "total_MHz": 0.0, "used_MHz": 0.0,
-                        "attached_users": 0, "demand_Mbps": 0.0, "served_Mbps": 0.0})
-                    a["sectors"] += 1
-                    a["total_MHz"] += bs.total_bandwidth_hz / 1e6
-                    a["used_MHz"]  += used_hz / 1e6
-                    a["attached_users"] += len(bs.attached_users)
-                    a["demand_Mbps"] += demand
-                    a["served_Mbps"] += served
-                pd.DataFrame(bs_rows).to_csv("bs_sector_utilisation.csv", index=False)
-                site_rows = []
-                for sid, a in site_agg.items():
-                    site_rows.append({
-                        "site_id": sid, "scenario": a["scenario"], "sectors": a["sectors"],
-                        "lat": round(a["lat"], 5), "lon": round(a["lon"], 5),
-                        "site_total_MHz": round(a["total_MHz"], 2),
-                        "site_used_MHz": round(a["used_MHz"], 3),
-                        "site_util_pct": round(100.0 * a["used_MHz"] / max(a["total_MHz"], 1e-6), 1),
-                        "attached_users": a["attached_users"],
-                        "demand_Mbps": round(a["demand_Mbps"], 2),
-                        "served_Mbps": round(a["served_Mbps"], 2),
-                    })
-                pd.DataFrame(site_rows).to_csv("site_utilisation.csv", index=False)
-                _n_full = sum(1 for r in bs_rows if r["util_pct"] >= 99.0)
-                print(f"   [util] wrote bs_sector_utilisation.csv ({len(bs_rows):,} cells) "
-                      f"and site_utilisation.csv ({len(site_rows):,} sites); "
-                      f"{_n_full:,} cells at >=99% utilisation "
-                      f"(mean cell util {np.mean([r['util_pct'] for r in bs_rows]):.1f}%).",
-                      flush=True)
-
             # ==================================================
             # PHASE 3: SPILLOVER LEDGER BINDING
             # ==================================================
@@ -454,38 +346,6 @@ def run_daily_mobility_simulation(
                     user_data_export.append({"User_ID": u.user_id, "Demand_Mbps": round(u.current_demand, 2), "H3_Cell": u.current_h3_id})
 
             leo_total_load = sum(sum(e["unmet_mbps"] for e in u_list) for u_list in unmet_demand_ledger.values())
-
-            # ---- PER-CELL NTN DEMAND vs ONE-BEAM CAPACITY LOG ----
-            # For each H3 cell in the spillover ledger: how much demand is asked
-            # of NTN, how many users, and whether it exceeds ONE beam's capacity.
-            # This is the file that answers "does per-cell overflow exceed a
-            # beam?" — the crux of the TN-vs-NTN / add-more-BS debate.
-            if abs(hour_of_day - 20.0) < 0.01:
-                _ntn_bw   = float(cfg.constellation.get("bandwidth_hz", 300e6))
-                _ntn_se   = float(cfg.constellation.get("spectral_eff", 1.77))
-                _beam_cap = _ntn_bw * _ntn_se / 1e6      # Mbps one beam can serve
-                cell_rows = []
-                for h3id, u_list in unmet_demand_ledger.items():
-                    dem = sum(e["unmet_mbps"] for e in u_list)
-                    cell_rows.append({
-                        "h3_id": h3id,
-                        "ntn_users": len(u_list),
-                        "ntn_demand_Mbps": round(dem, 3),
-                        "one_beam_cap_Mbps": round(_beam_cap, 1),
-                        "beams_needed": round(dem / max(_beam_cap, 1e-6), 3),
-                        "exceeds_one_beam": bool(dem > _beam_cap),
-                    })
-                _dfc = pd.DataFrame(cell_rows).sort_values("ntn_demand_Mbps", ascending=False)
-                _dfc.to_csv("ntn_cell_demand.csv", index=False)
-                _n_over = int(_dfc["exceeds_one_beam"].sum()) if len(_dfc) else 0
-                _tot    = len(_dfc)
-                _sum_over = float(_dfc.loc[_dfc["exceeds_one_beam"], "ntn_demand_Mbps"].sum()) if _n_over else 0.0
-                print(f"   [ntn] wrote ntn_cell_demand.csv: {_tot:,} cells need NTN; "
-                      f"one-beam cap = {_beam_cap:.0f} Mbps; "
-                      f"{_n_over:,} cells ({100*_n_over/max(_tot,1):.1f}%) exceed one beam "
-                      f"(these hold {_sum_over/1e6:.3f} Tbps of the spillover); "
-                      f"median beams_needed = {_dfc['beams_needed'].median():.2f}, "
-                      f"max = {_dfc['beams_needed'].max():.1f}.", flush=True)
 
             # ==================================================
             # PHASE 4: NTN FALLBACK EXECUTION

@@ -20,6 +20,37 @@ def _dump_users(users, path="data/users.pkl"):
     
     
 # Module-level globals, populated once per worker by the pool initializer.
+# Land mask for attractor placement: True where the WorldPop raster has a
+# value (any value, including 0 population -> workplaces/industrial areas are
+# valid destinations); False on nodata (water bodies, outside country mask).
+_LAND_MASK = None        # np.bool_ window of the raster
+_LAND_TRANSFORM = None   # rasterio Affine of the FULL raster
+_LAND_ROW_MIN = 0        # window offset into the full raster
+_LAND_COL_MIN = 0
+
+
+def _attractor_on_land(lat: float, lon: float) -> bool:
+    """True if (lat, lon) falls on a WorldPop LAND cell (value != nodata),
+    checking a 3x3 neighbourhood so a lone office pixel at the mask edge is
+    not rejected. If no land mask is loaded (non-WorldPop generation paths),
+    always returns True (check disabled)."""
+    if _LAND_MASK is None or _LAND_TRANSFORM is None:
+        return True
+    try:
+        row, col = rasterio.transform.rowcol(_LAND_TRANSFORM, lon, lat)
+    except Exception:
+        return False
+    r = row - _LAND_ROW_MIN
+    c = col - _LAND_COL_MIN
+    h, w = _LAND_MASK.shape
+    if r < -1 or r > h or c < -1 or c > w:
+        return False                      # outside the raster window entirely
+    r0, r1 = max(0, r - 1), min(h, r + 2)
+    c0, c1 = max(0, c - 1), min(w, c + 2)
+    if r0 >= r1 or c0 >= c1:
+        return False
+    return bool(_LAND_MASK[r0:r1, c0:c1].any())
+
 _BP = None        # boundary polygon (shapely)
 _CFG = None       # config
 _H3_RES = None    # h3 resolution
@@ -202,6 +233,19 @@ def generate_users(cfg: DictConfig, region: Region) -> List[User]:
             
             region_pop_data = dataset.read(1)[row_min:row_max, col_min:col_max]
             nodata = dataset.nodata
+
+            # LAND MASK for attractor placement: a cell is LAND if it has any
+            # raster value (incl. 0 population -> office/industrial areas are
+            # valid attractors). nodata (= water / outside mask) is NOT land.
+            global _LAND_MASK, _LAND_TRANSFORM, _LAND_ROW_MIN, _LAND_COL_MIN
+            if nodata is not None:
+                _LAND_MASK = (region_pop_data != nodata) & ~np.isnan(region_pop_data.astype(np.float64))
+            else:
+                _LAND_MASK = ~np.isnan(region_pop_data.astype(np.float64))
+            _LAND_TRANSFORM = dataset.transform
+            _LAND_ROW_MIN, _LAND_COL_MIN = row_min, col_min
+            print(f"   Land mask built: {int(_LAND_MASK.sum()):,} land cells "
+                  f"of {_LAND_MASK.size:,} (attractors restricted to land).")
             
             if nodata is not None:
                 valid_mask = (region_pop_data != nodata) & (region_pop_data > 0)
@@ -277,7 +321,7 @@ def generate_users(cfg: DictConfig, region: Region) -> List[User]:
                         users.append(spawned_user)
                             
         print("✅ WorldPop generation complete!", flush=True)
-    _dump_users(users, path="/Utilisateurs/dbenguer/ntn_tn_optim/data/users.pkl")
+    _dump_users(users, path="/Utilisateurs/dbenguer/ntn_tn/data/users.pkl")
     return users
 
 def _build_user_profile(uid: int, lat: float, lon: float, res: int, cfg: DictConfig, boundary_polygon) -> User:
@@ -335,12 +379,22 @@ def _build_user_profile(uid: int, lat: float, lon: float, res: int, cfg: DictCon
             r_deg = math.degrees(r_km / earth_radius_km)
             theta = np.random.uniform(0, 2 * np.pi)
             
-            attractor_lat = lat + (r_deg * math.degrees(math.sin(theta)))
-            attractor_lon = lon + (r_deg * math.degrees(math.cos(theta)) / math.cos(math.radians(lat)))
+            # FIX: removed erroneous math.degrees() around sin/cos -- it
+            # multiplied every jump by 57.3x (degrees(0.5)=28.6), so a drawn
+            # 5 km Pareto trip became ~290 km. sin/cos are ratios, not angles.
+            attractor_lat = lat + (r_deg * math.sin(theta))
+            attractor_lon = lon + (r_deg * math.cos(theta) / math.cos(math.radians(lat)))
             
-            if boundary_polygon.contains(Point(attractor_lon, attractor_lat)):
+            attempt_counter += 1
+            if (boundary_polygon.contains(Point(attractor_lon, attractor_lat))
+                    and _attractor_on_land(attractor_lat, attractor_lon)):
                 accepted_destination = True
-                
+            elif attempt_counter >= 50:
+                # Pathological geometry (e.g. island home): fall back to home
+                # rather than looping forever or placing a water attractor.
+                attractor_lat, attractor_lon = lat, lon
+                accepted_destination = True
+
         user.attractors.append((attractor_lat, attractor_lon))
         
     return user
