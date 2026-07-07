@@ -129,7 +129,7 @@ def _evaluate_attachment(user_pos):
         for other in intf_cells:
             if other.bs_id == bs.bs_id:
                 continue
-            ''''
+            '''
             if getattr(other, "site_id", -1) == serving_site:
                 continue
             '''
@@ -614,7 +614,7 @@ def run_daily_mobility_simulation(
 
             if user_animation_data:
                 pd.DataFrame(user_animation_data).to_csv("user_hourly_states.csv", mode='a', header=False, index=False)
-                user_animation_data.clear()
+                #user_animation_data.clear()
 
             if detailed_drop_log:
                 pd.DataFrame(detailed_drop_log).to_csv("detailed_drop_log.csv", mode='a', header=False, index=False)

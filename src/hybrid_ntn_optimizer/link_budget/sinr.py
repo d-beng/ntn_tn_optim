@@ -426,7 +426,7 @@ def calculate_tn_sinr_capacity(
     g_tx_dbi: float = 15.0,
     g_rx_ue_dbi: float = 0.0,
     serving_beamforming_gain_db: float = 12.0,
-    interferer_beamforming_suppression_db: float = 12.0,  
+    interferer_beamforming_suppression_db: float = 0.0,  
     carrier_freq_hz: float = 3.5e9,
     bandwidth_hz: float = 100e6,
     body_loss_db: float = 3.0,
