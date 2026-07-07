@@ -2,7 +2,7 @@ users_per_cluster_ratio: 15
 density_threshold: 100       
 use_physical_radius: True    
 fixed_coverage_radius_km: False  
-target_users_per_site: 100     # realistic macro load; tune to your operator
+target_users_per_site: 50     # realistic macro load; tune to your operator
 min_users_per_tn_cluster: 25
 overlap_factor: 0.1
 

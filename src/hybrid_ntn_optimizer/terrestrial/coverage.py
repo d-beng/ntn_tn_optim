@@ -433,7 +433,11 @@ def _representative_positions(users, cfg, region_res):
 # ----------------------------------------------------------------------
 def _urban_rma_underlay(all_coords, pos_density, candidates, bs_cfg, cfg,
                         density_map=None):
-    if not bool(_cfg_get(cfg, "terrestrial.urban_rma_underlay", True)):
+    # DEFAULT OFF: the demand-driven densification now fills dense-zone gaps
+    # with UMi/UMa (100 MHz) instead of this 20 MHz RMa blanket, which is the
+    # right tool where demand is high. Re-enable (urban_rma_underlay: true) only
+    # if you want the low-band safety net beneath the small-cell core.
+    if not bool(_cfg_get(cfg, "terrestrial.urban_rma_underlay", False)):
         return []
     umi_min = float(_cfg_get(cfg, "terrestrial.density_umi", 1000.0))
     dense_m = pos_density >= umi_min
@@ -732,13 +736,22 @@ def _demand_driven_densify(all_coords, pos_density, candidates, bs_cfg, cfg,
         # iterate: add cells one at a time, recompute ISD -> SE -> capacity
         n_cells = existing
         served_cap = 0.0
+        # interference-free spacing: above ~3x coverage radius, an added cell
+        # is too far to interfere, so SE stays at its baseline. Below it, SE
+        # degrades. This is the REAL spatial scale -- cells spread across a
+        # 253 km^2 beam-cell do NOT all interfere; only near-neighbours do.
+        isd_free_km = 3.0 * r
         def _cap(nc):
-            if nc <= 0: return 0.0
+            if nc <= 0: return 0.0, 6.5
             isd = math.sqrt(cell_area / nc)     # mean inter-site distance
-            if real_sinr:
-                se = _se_from_isd_real(clat, clon, tier, isd, bs_cfg, cfg)
+            if isd >= isd_free_km:
+                # cells far enough apart -> effectively no mutual interference,
+                # SE at baseline (each 100 MHz cell delivers full capacity).
+                se = _se_from_isd_real(clat, clon, tier, isd_free_km, bs_cfg, cfg) \
+                     if real_sinr else _se_from_isd_analytic(isd_free_km, r)
             else:
-                se = _se_from_isd_analytic(isd, r)
+                se = _se_from_isd_real(clat, clon, tier, isd, bs_cfg, cfg) \
+                     if real_sinr else _se_from_isd_analytic(isd, r)
             return nc * bw * se / 1e6, se
         served_cap, se_now = _cap(n_cells)
         prev_cap = served_cap
