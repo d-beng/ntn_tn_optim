@@ -13,7 +13,6 @@
 #SBATCH --error=analysis-%j.err
 #SBATCH --output=analysis-%j.out
 #SBATCH --mail-user=djad.benguerra@univ-lr.fr
-#SBATCH --mail-type=FAIL
 
 set -euo pipefail
 
