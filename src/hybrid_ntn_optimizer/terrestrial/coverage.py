@@ -677,6 +677,225 @@ def _se_from_isd_real(clat, clon, tier_key, isd_km, bs_cfg, cfg):
         return _se_from_isd_analytic(isd_km, r)
 
 
+
+# ----------------------------------------------------------------------
+# SMALL-CELL GAP FILL (simple, transparent — replaces the old densify logic)
+# The user's requested behaviour, verbatim: "search a zone where UMi is
+# deployed and based on it decide to fill" — i.e. a NORMAL gap fill:
+#   1. take positions in DENSE zones (density >= density_uma);
+#   2. check coverage against SMALL CELLS ONLY (UMI / UMA / UMI_MMW) —
+#      the 20 MHz RMa blanket is IGNORED, because RMa "covering" a dense
+#      gap is what was hiding the gaps from the filler;
+#   3. tile the uncovered dense users with UMi (urban) / UMa (suburban)
+#      on a gap-free hex lattice; optionally UMI_MMW (400 MHz mmWave) in
+#      ultra-dense cores if the scenario exists in config.
+# No SE-turnover heuristics: spacing is the tier's own lattice spacing
+# (d = r*sqrt(3)*packing), i.e. cells are placed at normal grid distance,
+# never packed tighter, so SINR stays at deployment-normal levels.
+# Config:
+#   terrestrial.small_cell_gap_fill (default True)
+#   terrestrial.gap_fill_min_users  (default 20)   min gap-users per new cell
+#   terrestrial.density_mmw        (default 3000)  people/km^2 for UMI_MMW
+#                                   (used only if scenarios.UMI_MMW exists)
+# ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# mmWAVE CAPACITY OVERLAY (400 MHz n257 layer over saturated dense cores)
+# mmWave's role in real networks: a CAPACITY overlay on top of the sub-6
+# coverage layer, never base coverage (150 m cells cannot give contiguous
+# coverage). The small-cell GAP fill only helps users OUTSIDE coverage, so
+# it can never reach the covered-but-saturated downtown sites. This pass
+# lays a UMI_MMW lattice over ALL users in ultra-dense zones
+# (density >= terrestrial.density_mmw), covered or not. The capacity-aware
+# attachment then automatically shifts overflow onto the 400 MHz layer.
+# Config: terrestrial.mmw_overlay (default True, needs scenarios.UMI_MMW),
+#         terrestrial.density_mmw (default 7500 people/km^2 — derived from
+#         measured saturation: non-sat UMi p90=6.7k, saturated p25=7.5k).
+# ----------------------------------------------------------------------
+def _mmw_capacity_overlay(all_coords, pos_density, candidates, bs_cfg, cfg,
+                          density_map=None):
+    if "UMI_MMW" not in bs_cfg:
+        return []
+    if not bool(_cfg_get(cfg, "terrestrial.mmw_overlay", True)):
+        return []
+    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 6000.0))
+    min_users = int(_cfg_get(cfg, "terrestrial.gap_fill_min_users", 20))
+    packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    R = 6371.0088
+    latlng = h3.latlng_to_cell
+
+    m = pos_density >= mmw_min
+    if m.sum() == 0:
+        print(f"   mmWave overlay: no zones at density >= {mmw_min:.0f}.", flush=True)
+        return []
+    pts = all_coords[m].astype(np.float64)
+
+    sc = bs_cfg["UMI_MMW"]
+    r = float(sc["coverage_radius_km"])
+    d = r * math.sqrt(3.0) * packing          # gap-free lattice at mmW scale
+    lat0 = math.radians(float(pts[:, 0].mean()))
+    x = np.radians(pts[:, 1]) * math.cos(lat0) * R
+    y = np.radians(pts[:, 0]) * R
+    dx = d; dy = d * math.sqrt(3.0) / 2.0
+    x0, y0 = x.min(), y.min()
+    row = np.round((y - y0) / dy).astype(np.int64)
+    col = np.round((x - x0 - (row & 1) * (dx * 0.5)) / dx).astype(np.int64)
+    node_x = x0 + col * dx + (row & 1) * (dx * 0.5)
+    node_y = y0 + row * dy
+    keys = row * 1_000_003 + col
+    order = np.argsort(keys, kind="stable")
+    ks = keys[order]
+    cut = np.where(np.diff(ks) != 0)[0] + 1
+    groups = np.split(order, cut)
+
+    # skip nodes already blanketed by an existing mmW cell (idempotence)
+    ex = [(c["lat"], c["lon"]) for c in candidates
+          if c.get("scenario_key") == "UMI_MMW"]
+    ex_tree = None
+    if ex and cKDTree is not None:
+        exa = np.asarray(ex)
+        ex_x = np.radians(exa[:, 1]) * math.cos(lat0) * R
+        ex_y = np.radians(exa[:, 0]) * R
+        ex_tree = cKDTree(np.column_stack([ex_x, ex_y]))
+
+    out = []
+    n_users_covered = 0
+    for g in groups:
+        if len(g) < min_users:
+            continue
+        nx, ny = float(node_x[g[0]]), float(node_y[g[0]])
+        if ex_tree is not None:
+            dd, _ = ex_tree.query([nx, ny], k=1)
+            if dd <= r * 0.8:
+                continue
+        clat = math.degrees(ny / R)
+        clon = math.degrees(nx / (R * math.cos(lat0)))
+        dcell = latlng(clat, clon, dens_res)
+        out.append({
+            "lat": clat, "lon": clon,
+            "raw_radius_km": r,
+            "density": float(density_map.get(dcell, 0.0)) if density_map else mmw_min,
+            "assigned_user_count": int(len(g)),
+            "membership_boundary": _make_radius_boundary((clat, clon), r, 24),
+            "zone_radius_km": r, "zone_size": int(len(g)),
+            "scenario_key": "UMI_MMW",
+            "coverage_radius_km": r,
+        })
+        n_users_covered += len(g)
+    print(f"   mmWave overlay (400 MHz n257, density >= {mmw_min:.0f}): "
+          f"{len(out):,} UMI_MMW cells over {n_users_covered:,} ultra-dense-core "
+          f"users (capacity layer over existing coverage).", flush=True)
+    return out
+
+
+def _small_cell_gap_fill(all_coords, pos_density, candidates, bs_cfg, cfg,
+                         density_map=None):
+    if not bool(_cfg_get(cfg, "terrestrial.small_cell_gap_fill", True)):
+        return []
+    umi_min = float(_cfg_get(cfg, "terrestrial.density_umi", 1000.0))
+    uma_min = float(_cfg_get(cfg, "terrestrial.density_uma", 400.0))
+    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 3000.0))
+    min_users = int(_cfg_get(cfg, "terrestrial.gap_fill_min_users", 20))
+    packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    has_mmw = "UMI_MMW" in bs_cfg
+    R = 6371.0088
+    latlng = h3.latlng_to_cell
+
+    dense_m = pos_density >= uma_min
+    if dense_m.sum() == 0:
+        return []
+    dense_idx = np.where(dense_m)[0]
+    pts = all_coords[dense_idx].astype(np.float64)
+    dens = pos_density[dense_idx]
+
+    # --- coverage check vs SMALL CELLS ONLY (RMa deliberately ignored) ---
+    small = [c for c in candidates
+             if c.get("scenario_key") in ("UMI", "UMA", "UMI_MMW")]
+    lat0 = math.radians(float(pts[:, 0].mean()))
+    ux = np.radians(pts[:, 1]) * math.cos(lat0) * R
+    uy = np.radians(pts[:, 0]) * R
+    covered = np.zeros(len(pts), dtype=bool)
+    if small and cKDTree is not None:
+        sx = np.array([math.radians(c["lon"]) * math.cos(lat0) * R for c in small])
+        sy = np.array([math.radians(c["lat"]) * R for c in small])
+        radii = np.array([float(c["coverage_radius_km"]) for c in small])
+        upts = np.column_stack([ux, uy])
+        for r in np.unique(radii):
+            sel = np.where(radii == r)[0]
+            tree = cKDTree(np.column_stack([sx[sel], sy[sel]]))
+            hit = tree.query_ball_point(upts, float(r))
+            for i, lst in enumerate(hit):
+                if lst:
+                    covered[i] = True
+    gap = ~covered
+    n_gap = int(gap.sum())
+    if n_gap == 0:
+        print("   Small-cell gap fill: no dense users outside small-cell "
+              "coverage.", flush=True)
+        return []
+
+    gx, gy = ux[gap], uy[gap]
+    gdens = dens[gap]
+
+    # --- choose tier per gap user by local density ---
+    if has_mmw:
+        tier_of = np.where(gdens >= mmw_min, "UMI_MMW",
+                   np.where(gdens >= umi_min, "UMI", "UMA"))
+    else:
+        tier_of = np.where(gdens >= umi_min, "UMI", "UMA")
+
+    out = []
+    added = {}
+    for tier in (["UMI_MMW", "UMI", "UMA"] if has_mmw else ["UMI", "UMA"]):
+        m = tier_of == tier
+        if m.sum() == 0:
+            continue
+        sc = bs_cfg[tier]
+        r = float(sc["coverage_radius_km"])
+        d = r * math.sqrt(3.0) * packing          # gap-free lattice spacing
+        tx, ty = gx[m], gy[m]
+        dx = d
+        dy = d * math.sqrt(3.0) / 2.0
+        x0, y0 = tx.min(), ty.min()
+        row = np.round((ty - y0) / dy).astype(np.int64)
+        col = np.round((tx - x0 - (row & 1) * (dx * 0.5)) / dx).astype(np.int64)
+        node_x = x0 + col * dx + (row & 1) * (dx * 0.5)
+        node_y = y0 + row * dy
+        keys = row * 1_000_003 + col
+        order = np.argsort(keys, kind="stable")
+        ks = keys[order]
+        cut = np.where(np.diff(ks) != 0)[0] + 1
+        groups = np.split(order, cut)
+        n_t = 0
+        for g in groups:
+            if len(g) < min_users:
+                continue
+            nx, ny = float(node_x[g[0]]), float(node_y[g[0]])
+            clat = math.degrees(ny / R)
+            clon = math.degrees(nx / (R * math.cos(lat0)))
+            dcell = latlng(clat, clon, dens_res)
+            out.append({
+                "lat": clat, "lon": clon,
+                "raw_radius_km": r,
+                "density": float(density_map.get(dcell, 0.0)) if density_map else float(gdens[m].mean()),
+                "assigned_user_count": int(len(g)),
+                "membership_boundary": _make_radius_boundary((clat, clon), r, 24),
+                "zone_radius_km": r, "zone_size": int(len(g)),
+                "scenario_key": tier,
+                "coverage_radius_km": r,
+            })
+            n_t += 1
+        added[tier] = n_t
+
+    msg = ", ".join(f"+{n} {t}" for t, n in added.items())
+    print(f"   Small-cell gap fill (RMa blanket IGNORED): {n_gap:,} dense "
+          f"users outside small-cell coverage -> {msg} "
+          f"(min {min_users} users/cell, normal lattice spacing).", flush=True)
+    return out
+
+
 def _demand_driven_densify(all_coords, pos_density, candidates, bs_cfg, cfg,
                            beam_res, mean_demand_mbps, density_map=None):
     """Add UMi/UMa cells in overflowing dense beam-cells until demand is met or
@@ -686,7 +905,7 @@ def _demand_driven_densify(all_coords, pos_density, candidates, bs_cfg, cfg,
     umi_min = float(_cfg_get(cfg, "terrestrial.density_umi", 1000.0))
     uma_min = float(_cfg_get(cfg, "terrestrial.density_uma", 400.0))
     real_sinr = bool(_cfg_get(cfg, "terrestrial.densify_real_sinr", True))
-    packing_min = float(_cfg_get(cfg, "terrestrial.densify_packing_min", 0.5))
+    packing_min = float(_cfg_get(cfg, "terrestrial.densify_packing_min", 1.0))
     # packing_min = min ISD/r allowed (1.0 = cells may reach heavy overlap).
 
     latlng = h3.latlng_to_cell
@@ -985,10 +1204,16 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
         # in overflowing dense beam-cells until demand is met OR packing/SE limit
         # is hit. Uses degraded SE so added capacity is physically real, not
         # imaginary. RMa is NOT used here (20 MHz too small for dense demand).
-        densify_fill = _demand_driven_densify(all_coords, pos_density, candidates,
-                                              bs_cfg, cfg, h3_resolution,
-                                              _mean_demand, density_map=density_map)
-        candidates.extend(densify_fill)
+        gap_fill = _small_cell_gap_fill(all_coords, pos_density, candidates,
+                                        bs_cfg, cfg, density_map=density_map)
+        candidates.extend(gap_fill)
+
+        # FIFTH PASS — mmWave capacity overlay: 400 MHz n257 lattice over the
+        # ultra-dense cores (covered or not); capacity-aware attachment shifts
+        # overflow onto it automatically.
+        mmw_fill = _mmw_capacity_overlay(all_coords, pos_density, candidates,
+                                         bs_cfg, cfg, density_map=density_map)
+        candidates.extend(mmw_fill)
 
     # ------------------------------------------------------------------
     # Build BaseStation objects (unchanged construction)
@@ -1017,8 +1242,13 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
         center = (c["lat"], c["lon"])
         coverage_boundary = _make_radius_boundary(center, sc["coverage_radius_km"])
 
-        # number of sectors for this site
-        n_sec = umi_sectors if scenario_key == "UMI" else sectors_per_macro
+        # UMI_MMW (28 GHz n257) uses the UMi propagation scenario -- TR 38.901
+        # UMi-Street Canyon is valid 0.5-100 GHz -- with its own RF params
+        # (400 MHz, 30 dBm, 23 dBi array) coming from bs_cfg[scenario_key].
+        enum_key = "UMI" if scenario_key == "UMI_MMW" else scenario_key
+
+        # number of sectors for this site (mmW treated like UMi small cells)
+        n_sec = umi_sectors if scenario_key.startswith("UMI") else sectors_per_macro
         n_sec = max(1, n_sec)
         # boresight azimuths evenly spaced; omni site (n_sec==1) -> azimuth None
         if n_sec == 1:
@@ -1034,7 +1264,7 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
         for az in azimuths:
             bs = BaseStation(
                 bs_id=bs_id_counter, lat=float(c["lat"]), lon=float(c["lon"]),
-                scenario=DeploymentScenario[scenario_key],
+                scenario=DeploymentScenario[enum_key],
                 p_tx_dbm=sc["p_tx_dbm"], g_tx_dbi=sc["g_tx_dbi"],
                 carrier_freq_hz=sc["carrier_freq_hz"], total_bandwidth_hz=sc["bandwidth_hz"],
                 capacity_mbps=sc["bs_capacity_mbps"], bs_height_m=sc["default_h_bs"],

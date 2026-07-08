@@ -486,6 +486,8 @@ def calculate_tn_sinr_capacity(
     (sinr_db, throughput_mbps, spectral_efficiency_bps_hz, diag)
     """
     rng = np.random.default_rng(seed)
+    
+    noise_figure_db=10.0 if carrier_freq_hz > 24e9 else 7.0
 
     # ── Serving signal power ──────────────────────────────────────────────────
     pl_serving_db, los_serving = pathloss_3gpp(
