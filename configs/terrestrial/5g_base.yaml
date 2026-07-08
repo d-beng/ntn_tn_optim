@@ -5,6 +5,7 @@ fixed_coverage_radius_km: False
 target_users_per_site: 50     # realistic macro load; tune to your operator
 min_users_per_tn_cluster: 25
 overlap_factor: 0.1
+density_h3_resolution: 8
 
 # Shared RF Defaults
 g_rx_ue_dbi: 0.0             
