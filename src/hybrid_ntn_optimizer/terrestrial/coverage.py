@@ -294,7 +294,7 @@ def _backfill_rma(all_coords, uncovered_idx, bs_cfg, cfg, random_seed, density_m
     rma_r = float(bs_cfg["RMA"]["coverage_radius_km"])
     packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
     min_users = int(_cfg_get(cfg, "terrestrial.rma_backfill_min_users", 1))
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
 
     pts = all_coords[uncovered_idx].astype(np.float64)   # lat, lon
     lat0 = math.radians(float(pts[:, 0].mean()))
@@ -363,7 +363,7 @@ def _representative_positions(users, cfg, region_res):
     if not hours:
         return np.asarray([[u.home_lat, u.home_lon] for u in users], dtype=np.float32)
     draws = int(_cfg_get(cfg, "terrestrial.snapshots_per_hour", 1))
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
     latlng = h3.latlng_to_cell
 
     n = len(users)
@@ -448,7 +448,7 @@ def _urban_rma_underlay(all_coords, pos_density, candidates, bs_cfg, cfg,
     rma_r   = float(bs_cfg["RMA"]["coverage_radius_km"])
     packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
     d = rma_r * math.sqrt(3.0) * packing
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
     R = 6371.0088
     lat0 = math.radians(float(pts[:, 0].mean()))
     x = np.radians(pts[:, 1]) * math.cos(lat0) * R
@@ -546,7 +546,7 @@ def _capacity_capped_backfill(all_coords, candidates, bs_cfg, cfg,
     rma_r   = float(bs_cfg["RMA"]["coverage_radius_km"])
     packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
     d       = rma_r * math.sqrt(3.0) * packing
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
     R = 6371.0088
 
     out = []
@@ -718,10 +718,10 @@ def _mmw_capacity_overlay(all_coords, pos_density, candidates, bs_cfg, cfg,
         return []
     if not bool(_cfg_get(cfg, "terrestrial.mmw_overlay", True)):
         return []
-    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 6000.0))
+    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 3000.0))
     min_users = int(_cfg_get(cfg, "terrestrial.gap_fill_min_users", 20))
     packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
     R = 6371.0088
     latlng = h3.latlng_to_cell
 
@@ -798,7 +798,7 @@ def _small_cell_gap_fill(all_coords, pos_density, candidates, bs_cfg, cfg,
     mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 3000.0))
     min_users = int(_cfg_get(cfg, "terrestrial.gap_fill_min_users", 20))
     packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
     has_mmw = "UMI_MMW" in bs_cfg
     R = 6371.0088
     latlng = h3.latlng_to_cell
@@ -1013,7 +1013,7 @@ def _demand_driven_densify(all_coords, pos_density, candidates, bs_cfg, cfg,
             if placed >= added_here: break
             clat2 = math.degrees(ny / R)
             clon2 = math.degrees(nx / (R * math.cos(lat0)))
-            dcell = latlng(clat2, clon2, int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7)))
+            dcell = latlng(clat2, clon2, int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9)))
             out.append({
                 "lat": clat2, "lon": clon2,
                 "raw_radius_km": r,
@@ -1055,7 +1055,7 @@ def generate_terrestrial_network(cfg: DictConfig, users: List[User], h3_resoluti
         _cfg_get(cfg, "terrestrial.users_per_cluster_ratio", 1300))))
     overlap_factor = float(_cfg_get(cfg, "terrestrial.overlap_factor", 1.0))
     hull_cap = int(_cfg_get(cfg, "terrestrial.hull_sample_cap", 4000))
-    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 7))
+    dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
 
     bs_cfg = _cfg_get(cfg, "terrestrial.scenarios", None)
     if bs_cfg is None:

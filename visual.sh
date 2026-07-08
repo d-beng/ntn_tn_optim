@@ -20,7 +20,6 @@
 #SBATCH --error=viz-%j.err
 #SBATCH --output=viz-%j.out
 #SBATCH --mail-user=djad.benguerra@univ-lr.fr
-#SBATCH --mail-type=END,FAIL
 
 set -euo pipefail
 unset PYTHONHOME

@@ -5,7 +5,7 @@ fixed_coverage_radius_km: False
 target_users_per_site: 50     # realistic macro load; tune to your operator
 min_users_per_tn_cluster: 25
 overlap_factor: 0.1
-density_h3_resolution: 8
+density_h3_resolution: 9
 
 # Shared RF Defaults
 g_rx_ue_dbi: 0.0             
@@ -42,18 +42,18 @@ scenarios:
     interference_cutoff_m: 5000.0
     min_user_dist_m: 25.0
 
-    UMI_MMW:
-      p_tx_dbm: 30.0                 # mmWave small cell (low conducted power, high array gain)
-      g_tx_dbi: 23.0                 # phased-array beamforming gain
-      carrier_freq_hz: 28.0e9        # n257 (26.5–29.5 GHz), North America mmWave band
-      bandwidth_hz: 400e6            # max FR2 channel bandwidth for n257
-      coverage_radius_km: 0.122       
-      default_h_bs: 10.0             # street-level, same as UMi
-      shadow_sigma_los_db: 4.0       # TR 38.901 UMi LOS
-      shadow_sigma_nlos_db: 7.82     # TR 38.901 UMi NLOS
-      bs_capacity_mbps: 0.0
-      interference_cutoff_m: 1000.0  # mmWave interference decays fast
-      min_user_dist_m: 10.0
+  UMI_MMW:
+    p_tx_dbm: 30.0                 # mmWave small cell (low conducted power, high array gain)
+    g_tx_dbi: 23.0                 # phased-array beamforming gain
+    carrier_freq_hz: 28.0e9        # n257 (26.5–29.5 GHz), North America mmWave band
+    bandwidth_hz: 400e6            # max FR2 channel bandwidth for n257
+    coverage_radius_km: 0.122       
+    default_h_bs: 10.0             # street-level, same as UMi
+    shadow_sigma_los_db: 4.0       # TR 38.901 UMi LOS
+    shadow_sigma_nlos_db: 7.82     # TR 38.901 UMi NLOS
+    bs_capacity_mbps: 0.0
+    interference_cutoff_m: 1000.0  # mmWave interference decays fast
+    min_user_dist_m: 10.0
   
   RMA:
     p_tx_dbm: 46.0                
