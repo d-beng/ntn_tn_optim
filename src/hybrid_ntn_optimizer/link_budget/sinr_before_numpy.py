@@ -426,9 +426,7 @@ def calculate_tn_sinr_capacity(
     g_tx_dbi: float = 15.0,
     g_rx_ue_dbi: float = 0.0,
     serving_beamforming_gain_db: float = 12.0,
-    interferer_beamforming_suppression_db: float = 12.0,  # MIMO spatial selectivity;
-                                                          # composes with the sector
-                                                          # pattern (different effects)
+    interferer_beamforming_suppression_db: float = 0.0,  
     carrier_freq_hz: float = 3.5e9,
     bandwidth_hz: float = 100e6,
     body_loss_db: float = 3.0,
@@ -460,11 +458,7 @@ def calculate_tn_sinr_capacity(
     Parameters
     ----------
     dist_to_serving_m              : 2-D distance to serving BS [m]
-    interferers                    : list of raw-number tuples per interferer:
-                                     (dist_m, scenario, carrier_freq_hz,
-                                      bs_height_m, sigma_los_db, sigma_nlos_db,
-                                      p_tx_dbm, g_tx_dbi, lat, lon,
-                                      sector_azimuth_deg_or_None)
+    interferers                    : list of tuples (BaseStation, 2-D distance) to interfering BSs [m]
     scenario                       : 3GPP deployment scenario
     p_tx_dbm                       : BS transmit power [dBm]
     g_tx_dbi                       : BS antenna gain [dBi] (serving; may already
@@ -492,6 +486,8 @@ def calculate_tn_sinr_capacity(
     (sinr_db, throughput_mbps, spectral_efficiency_bps_hz, diag)
     """
     rng = np.random.default_rng(seed)
+    
+    noise_figure_db=10.0 if carrier_freq_hz > 24e9 else 7.0
 
     # ── Serving signal power ──────────────────────────────────────────────────
     pl_serving_db, los_serving = pathloss_3gpp(
@@ -504,30 +500,30 @@ def calculate_tn_sinr_capacity(
     s_mw  = 10.0 ** (s_dbm / 10.0)
 
     # ── Aggregate interference ────────────────────────────────────────────────
-    # [ARRAY SNAPSHOT] Each interferer is a tuple of RAW NUMBERS (no objects,
-    # so worker processes never need BaseStation copies):
-    #   (dist_m, scenario: DeploymentScenario, carrier_freq_hz, bs_height_m,
-    #    shadow_sigma_los_db, shadow_sigma_nlos_db, p_tx_dbm, g_tx_dbi,
-    #    lat, lon, sector_azimuth_deg_or_None)
     i_mw = 0.0
-    for intf in interferers:
-        (d_intf_m, scen_j, fc_j, hbs_j, sig_los_j, sig_nlos_j,
-         ptx_j, gtx_j, lat_j, lon_j, az_j) = intf
+    for bs_intf, d_intf_m in interferers:
+        pl_j_db, los_j = pathloss_3gpp(
+            bs_intf.scenario,
+            d_intf_m,
+            bs_intf.carrier_freq_hz,
+            bs_intf.bs_height_m
+        )
 
-        pl_j_db, los_j = pathloss_3gpp(scen_j, d_intf_m, fc_j, hbs_j)
-
-        sigma_j = sig_los_j if los_j else sig_nlos_j
+        sigma_j = bs_intf.shadow_sigma_los_db if los_j else bs_intf.shadow_sigma_nlos_db
         pl_j_db += body_loss_db + rng.normal(0.0, sigma_j)
 
         # [SECTOR] directional interferer antenna gain toward the served UE.
-        # 0 dB for omni cells (az_j is None); negative (down to -30 dB) for
-        # sectors pointing away. Requires the UE position.
+        # 0 dB for omni cells; negative (down to -30 dB) for sectors pointing
+        # away. Requires the UE position; if not provided, offset is 0 dB.
         if ue_lat is not None and ue_lon is not None:
-            intf_sector_off = sector_gain_db(lat_j, lon_j, az_j, ue_lat, ue_lon)
+            intf_sector_off = sector_gain_db(
+                bs_intf.lat, bs_intf.lon,
+                getattr(bs_intf, "sector_azimuth_deg", None),
+                ue_lat, ue_lon)
         else:
             intf_sector_off = 0.0
 
-        p_rx_j_dbm = (ptx_j + gtx_j + intf_sector_off + g_rx_ue_dbi
+        p_rx_j_dbm = (bs_intf.p_tx_dbm + bs_intf.g_tx_dbi + intf_sector_off + g_rx_ue_dbi
                       - interferer_beamforming_suppression_db
                       - pl_j_db)
         i_mw += 10.0 ** (p_rx_j_dbm / 10.0)

@@ -650,18 +650,19 @@ def _se_from_isd_real(clat, clon, tier_key, isd_km, bs_cfg, cfg):
     sc = bs_cfg[tier_key]
     r = float(sc["coverage_radius_km"])
     ue_d_m = max(0.5 * r * 1000.0, float(sc["min_user_dist_m"]))
-    # 6 interferers on a ring at isd_km, as RAW-NUMBER tuples matching the
-    # sinr.py array-snapshot interferer format:
-    # (dist_m, scenario, fc_hz, h_bs_m, sigma_los, sigma_nlos,
-    #  p_tx_dbm, g_tx_dbi, lat, lon, sector_azimuth_or_None)
-    scen = DeploymentScenario[tier_key]
-    interferers = [(
-        isd_km * 1000.0, scen,
-        float(sc["carrier_freq_hz"]), float(sc["default_h_bs"]),
-        float(sc["shadow_sigma_los_db"]), float(sc["shadow_sigma_nlos_db"]),
-        float(sc["p_tx_dbm"]), float(sc["g_tx_dbi"]),
-        clat, clon, None,
-    ) for _ in range(6)]
+    # 6 interferers on a ring at isd_km
+    class _I:  # lightweight stand-in with the attrs the sinr fn reads
+        pass
+    interferers = []
+    for k in range(6):
+        it = _I()
+        it.scenario = DeploymentScenario[tier_key]
+        it.carrier_freq_hz = sc["carrier_freq_hz"]; it.bs_height_m = sc["default_h_bs"]
+        it.p_tx_dbm = sc["p_tx_dbm"]; it.g_tx_dbi = sc["g_tx_dbi"]
+        it.shadow_sigma_los_db = sc["shadow_sigma_los_db"]; it.shadow_sigma_nlos_db = sc["shadow_sigma_nlos_db"]
+        it.min_user_dist_m = sc["min_user_dist_m"]; it.lat = clat; it.lon = clon
+        it.sector_azimuth_deg = None
+        interferers.append((it, isd_km * 1000.0))
     try:
         _, _, se, _ = calculate_tn_sinr_capacity(
             dist_to_serving_m=ue_d_m, interferers=interferers,
@@ -717,7 +718,7 @@ def _mmw_capacity_overlay(all_coords, pos_density, candidates, bs_cfg, cfg,
         return []
     if not bool(_cfg_get(cfg, "terrestrial.mmw_overlay", True)):
         return []
-    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 7500.0))
+    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 3000.0))
     min_users = int(_cfg_get(cfg, "terrestrial.gap_fill_min_users", 20))
     packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
     dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
@@ -794,7 +795,7 @@ def _small_cell_gap_fill(all_coords, pos_density, candidates, bs_cfg, cfg,
         return []
     umi_min = float(_cfg_get(cfg, "terrestrial.density_umi", 1000.0))
     uma_min = float(_cfg_get(cfg, "terrestrial.density_uma", 400.0))
-    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 7500.0))
+    mmw_min = float(_cfg_get(cfg, "terrestrial.density_mmw", 3000.0))
     min_users = int(_cfg_get(cfg, "terrestrial.gap_fill_min_users", 20))
     packing = float(_cfg_get(cfg, "terrestrial.hex_packing", 0.95))
     dens_res = int(_cfg_get(cfg, "terrestrial.density_h3_resolution", 9))
