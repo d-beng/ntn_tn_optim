@@ -67,8 +67,8 @@ def allocate_ntn_beams(
     # ── 3. Build demanding-hex list ──────────────────────────────────────────
     hex_needs: List[Dict[str, Any]] = []
     for hex_id, user_list in unmet_demand_ledger.items():
-        total_need = sum(item["unmet_mbps"] for item in user_list if item["unmet_mbps"] > 0.1)
-        if total_need > 0.1:
+        total_need = sum(item["unmet_mbps"] for item in user_list if item["unmet_mbps"] > 0.0)
+        if total_need > 0.0:
             hex_needs.append({"hex_id": hex_id, "total_need": total_need, "users": user_list})
 
     if not hex_needs:
@@ -139,7 +139,7 @@ def allocate_ntn_beams(
             off_axis_angles_interferers.append(
                 math.degrees(math.atan2(surface_dist_km, slant_range_km)))
 
-        eligible = [e for e in needy["users"] if e["unmet_mbps"] > 0.1]
+        eligible = [e for e in needy["users"] if e["unmet_mbps"] > 0.0]
         new_beam = Beam(
             satellite_id=sat.satellite_id, target_cell_id=hid,
             elevation_deg=elevation_deg, slant_range_km=slant_range_km, is_active=True)
@@ -200,7 +200,7 @@ def allocate_ntn_beams(
                 u.served_mbps += served
                 new_beam.allocated_mbps += served
                 new_beam.active_users += 1
-                if entry["unmet_mbps"] <= 0.1:
+                if entry["unmet_mbps"] <= 0.0:
                     u.current_state = "LEO"
                     u.ntn_reason = "Fully Served"
                 else:
@@ -230,7 +230,7 @@ def allocate_ntn_beams(
         if sat is None:
             # Visible satellites exist but all are beam-saturated.
             for entry in needy["users"]:
-                if entry["unmet_mbps"] > 0.1:
+                if entry["unmet_mbps"] > 0.0:
                     entry["user"].ntn_reason = "All Visible Satellites Beam-Saturated"
             continue
         beam = _serve_hex(needy, sat, rec)
@@ -243,10 +243,10 @@ def allocate_ntn_beams(
     # One beam per (sat, hex): a hex may get a SECOND beam only from a DIFFERENT
     # satellite it has not already used. Highest remaining unmet first.
     def _remaining_unmet(n):
-        return sum(e["unmet_mbps"] for e in n["users"] if e["unmet_mbps"] > 0.1)
+        return sum(e["unmet_mbps"] for e in n["users"] if e["unmet_mbps"] > 0.0)
 
     still = sorted(
-        (n for n in hex_needs if _remaining_unmet(n) > 0.1),
+        (n for n in hex_needs if _remaining_unmet(n) > 0.0),
         key=_remaining_unmet, reverse=True)
 
     for needy in still:

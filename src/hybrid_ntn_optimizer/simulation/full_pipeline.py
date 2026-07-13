@@ -396,7 +396,7 @@ def run_daily_mobility_simulation(
                 total_demand += u.current_demand
                 u.served_mbps = 0.0
                 u.locked_to_tn = False
-                u.coverage_type = "IDLE" if u.current_demand < 0.1 else "DROPPED"
+                u.coverage_type = "IDLE" if u.current_demand <= 0.0 else "DROPPED"
 
                 u.tn_eval_bs = "None"
                 u.tn_reason = "N/A"
