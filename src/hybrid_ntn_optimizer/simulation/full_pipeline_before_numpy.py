@@ -1,13 +1,4 @@
 import os
-# [MEM] Pin BLAS/OpenMP to 1 thread per process BEFORE numpy loads. Each of
-# the 250 forked PHASE-1 workers otherwise spawns its own ~256-thread OpenBLAS
-# pool (stacks + work buffers), which alone can OOM the node. The sbatch
-# should ALSO export these (authoritative if numpy was already imported by an
-# earlier module):
-for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-    os.environ.setdefault(_v, "1")
-import gc
 import math
 from time import sleep
 from concurrent.futures import ProcessPoolExecutor
@@ -59,33 +50,15 @@ except Exception:  # pragma: no cover
 #     sector that passes the wedge test); a site's other two sectors are
 #     rejected by the cheap angle test before any SINR math.
 # ======================================================================
+_BASE_STATIONS: List[BaseStation] = []
 _G_RX_UE_DBI: float = 0.0
 _KD = None
+_CELL_XY = None
 _LAT0 = 0.0
 _MAX_COV_R_KM = 0.0
 _MAX_INTF_CUTOFF_M = 0.0
 _TOPK = 6          # candidate cells returned per user (capacity-aware attach)
 _R_EARTH_KM = 6371.0088
-
-# [SHARED NETWORK SNAPSHOT — fork-inherited, copy-on-write-safe]
-# Workers never receive BaseStation OBJECTS (576k objects x 250 workers OOMed
-# the node: CPython refcounts defeat copy-on-write, and initargs pickles a
-# full private copy per worker). Instead the main process packs the 13 numeric
-# fields PHASE 1 actually reads into ONE float64 array + three int arrays,
-# sets them as module globals BEFORE the pool is created, and the KD-tree is
-# built ONCE in the main process. Linux fork then shares these read-only
-# buffers across all workers at ~60 MB total, regardless of worker count.
-# Column layout of _CELLS (float64, shape (N, 13)):
-#   0 lat | 1 lon | 2 coverage_radius_km | 3 min_user_dist_m
-#   4 interference_cutoff_m | 5 p_tx_dbm | 6 g_tx_dbi | 7 carrier_freq_hz
-#   8 bandwidth_hz | 9 bs_height_m | 10 shadow_sigma_los_db
-#   11 shadow_sigma_nlos_db | 12 sector_azimuth_deg (NaN = omni)
-_CELLS = None          # (N, 13) float64
-_SITE_IDS = None       # (N,) int64
-_SCEN_CODES = None     # (N,) int16  -> index into _SCEN_ENUMS
-_BS_IDS = None         # (N,) int64  -> BaseStation.bs_id (explicit, not row idx)
-_SCEN_ENUMS = None     # tuple of DeploymentScenario members
-_P = None              # dict of EXPLICIT link-budget parameters (no defaults)
 
 
 def _project_km(lat, lon, lat0):
@@ -94,53 +67,31 @@ def _project_km(lat, lon, lat0):
     return x, y
 
 
-def _set_worker_network(cells, site_ids, scen_codes, bs_ids, scen_enums,
-                        params, g_rx_ue_dbi, lat0, kd_tree,
-                        max_cov_r_km, max_intf_cutoff_m):
-    """Called in the MAIN process BEFORE the pool is created. Workers inherit
-    these module globals via fork (arrays are CoW-shared; the cKDTree is a C
-    object whose pages are read-only in workers)."""
-    global _CELLS, _SITE_IDS, _SCEN_CODES, _BS_IDS, _SCEN_ENUMS, _P
-    global _G_RX_UE_DBI, _LAT0, _KD, _MAX_COV_R_KM, _MAX_INTF_CUTOFF_M
-    _CELLS = cells
-    _SITE_IDS = site_ids
-    _SCEN_CODES = scen_codes
-    _BS_IDS = bs_ids
-    _SCEN_ENUMS = scen_enums
-    _P = params
+def _init_attachment_worker(base_stations, g_rx_ue_dbi, lat0,
+                            cell_xy, max_cov_r_km, max_intf_cutoff_m):
+    """Pool initializer: store the static snapshot + spatial index per worker."""
+    global _BASE_STATIONS, _G_RX_UE_DBI, _KD, _CELL_XY, _LAT0
+    global _MAX_COV_R_KM, _MAX_INTF_CUTOFF_M
+    _BASE_STATIONS = base_stations
     _G_RX_UE_DBI = g_rx_ue_dbi
     _LAT0 = lat0
-    _KD = kd_tree
+    _CELL_XY = cell_xy
     _MAX_COV_R_KM = max_cov_r_km
     _MAX_INTF_CUTOFF_M = max_intf_cutoff_m
-
-
-def _init_attachment_worker():
-    """Pool initializer: verify the fork-inherited globals actually arrived.
-    (On a non-fork start method they would be None -> fail loudly, never
-    silently compute with missing state.) Also disables the cyclic GC in the
-    worker: the attachment loop creates no reference cycles (tuples/lists/
-    dicts of floats), refcounting frees everything, and a GC pass in a forked
-    child would dirty inherited copy-on-write pages."""
-    gc.disable()
-    if _CELLS is None or _KD is None and cKDTree is not None:
-        raise RuntimeError(
-            "PHASE 1 worker started without the shared network snapshot. "
-            "The pool must be created AFTER _set_worker_network() in a "
-            "fork-based start method (Linux default).")
+    if cKDTree is not None and cell_xy is not None and len(cell_xy):
+        _KD = cKDTree(cell_xy)
+    else:
+        _KD = None
 
 
 def _evaluate_attachment(user_pos):
-    """Side-effect-free PHASE 1 inner loop over the shared array snapshot.
+    """Side-effect-free PHASE 1 inner loop with spatial pre-filtering + sectors.
 
     Input : (user_lat, user_lon)
-    Output: list of up to _TOPK candidates (sinr_db, spec_eff, bs_id, diag),
-            sorted by SINR desc; [] if no cell is in geographic range.
+    Output: (best_bs_id, best_sinr, best_spec_eff, best_diag)
     """
     u_lat, u_lon = user_pos
-    C = _CELLS
-    if C is None:
-        raise RuntimeError("worker network snapshot missing")
+    candidates_out = []
 
     # --- SPATIAL PREFILTER: candidate serving cells + candidate interferers ---
     if _KD is not None:
@@ -149,83 +100,66 @@ def _evaluate_attachment(user_pos):
         if not serving_idx:
             return []
         intf_idx = _KD.query_ball_point((ux, uy), _MAX_INTF_CUTOFF_M / 1000.0)
+        intf_cells = [_BASE_STATIONS[i] for i in intf_idx]
     else:
-        serving_idx = range(len(C))
-        intf_idx = list(range(len(C)))
+        serving_idx = range(len(_BASE_STATIONS))
+        intf_cells = _BASE_STATIONS
 
-    candidates_out = []
     for si in serving_idx:
-        row = C[si]
-        d_m = haversine_distance(u_lat, u_lon, row[0], row[1])
-        if (d_m / 1000.0) > row[2]:
+        bs = _BASE_STATIONS[si]
+        d_m = haversine_distance(u_lat, u_lon, bs.lat, bs.lon)
+        if (d_m / 1000.0) > bs.coverage_radius_km:
             continue
 
         # SECTOR ADMISSION: user must lie inside this sector's wedge (omni passes)
-        az = row[12]
-        az_v = None if math.isnan(az) else float(az)
-        if not in_sector(row[0], row[1], az_v, u_lat, u_lon):
+        if not in_sector(bs.lat, bs.lon, getattr(bs, "sector_azimuth_deg", None),
+                         u_lat, u_lon):
             continue
 
-        d_m = max(d_m, row[3])
+        d_m = max(d_m, bs.min_user_dist_m)
 
         # serving sector antenna gain offset toward the user (<=0 dB; 0 for omni)
-        serv_sector_gain = sector_gain_db(row[0], row[1], az_v, u_lat, u_lon)
+        serv_sector_gain = sector_gain_db(
+            bs.lat, bs.lon, getattr(bs, "sector_azimuth_deg", None), u_lat, u_lon)
 
         # interferers: nearby cells within their own cutoff, excluding the
         # serving cell AND all co-located sectors of the serving site.
-        # Each interferer is a tuple of RAW NUMBERS (no objects):
-        # (dist_m, scenario, fc_hz, h_bs_m, sigma_los, sigma_nlos,
-        #  p_tx_dbm, g_tx_dbi, lat, lon, sector_azimuth_or_None)
-        serving_site = _SITE_IDS[si]
         interferers = []
-        for oi in intf_idx:
-            if oi == si:
+        serving_site = getattr(bs, "site_id", -2)
+        for other in intf_cells:
+            if other.bs_id == bs.bs_id:
                 continue
-            if _SITE_IDS[oi] == serving_site:
+            '''
+            if getattr(other, "site_id", -1) == serving_site:
                 continue
-            orow = C[oi]
-            dist = haversine_distance(u_lat, u_lon, orow[0], orow[1])
-            if dist <= orow[4]:
-                dist = max(dist, orow[3])
-                oaz = orow[12]
-                interferers.append((
-                    dist,
-                    _SCEN_ENUMS[_SCEN_CODES[oi]],
-                    orow[7], orow[9],
-                    orow[10], orow[11],
-                    orow[5], orow[6],
-                    orow[0], orow[1],
-                    None if math.isnan(oaz) else float(oaz),
-                ))
+            '''
+            dist = haversine_distance(u_lat, u_lon, other.lat, other.lon)
+            if dist <= other.interference_cutoff_m:
+                dist = max(dist, other.min_user_dist_m)
+                interferers.append((other, dist))
 
-        # EVERY link-budget parameter passed EXPLICITLY from _P (built from
-        # config in the main process) — nothing left to function defaults.
         sinr_db, capacity_mbps, spec_eff, diag = calculate_tn_sinr_capacity(
-            bs_height_m=row[9],
             dist_to_serving_m=d_m,
             interferers=interferers,
-            shadow_sigma_los_db=row[10],
-            shadow_sigma_nlos_db=row[11],
-            scenario=_SCEN_ENUMS[_SCEN_CODES[si]],
-            p_tx_dbm=row[5],
-            g_tx_dbi=row[6] + serv_sector_gain,
+            scenario=bs.scenario,
+            p_tx_dbm=bs.p_tx_dbm,
+            g_tx_dbi=bs.g_tx_dbi + serv_sector_gain,
             g_rx_ue_dbi=_G_RX_UE_DBI,
-            serving_beamforming_gain_db=_P["serving_beamforming_gain_db"],
-            interferer_beamforming_suppression_db=_P["interferer_beamforming_suppression_db"],
-            carrier_freq_hz=row[7],
-            bandwidth_hz=row[8],
-            body_loss_db=_P["body_loss_db"],
-            noise_figure_db=(_P["noise_figure_fr2_db"] if row[7] > 24e9
-                             else _P["noise_figure_db"]),
-            implementation_loss_factor=_P["implementation_loss_factor"],
-            ue_height_m=_P["ue_height_m"],
+            carrier_freq_hz=bs.carrier_freq_hz,
+            bandwidth_hz=bs.total_bandwidth_hz,
+            bs_height_m=bs.bs_height_m,
+            shadow_sigma_los_db=bs.shadow_sigma_los_db,
+            shadow_sigma_nlos_db=bs.shadow_sigma_nlos_db,
             ue_lat=u_lat,
             ue_lon=u_lon,
         )
-        candidates_out.append((sinr_db, spec_eff, int(_BS_IDS[si]), diag))
+
+        candidates_out.append((sinr_db, spec_eff, bs.bs_id, diag))
 
     if not candidates_out:
         return []
+    # return top-K by SINR so the main process can pick the best cell that
+    # still has bandwidth (capacity-aware attachment / load balancing).
     candidates_out.sort(key=lambda t: t[0], reverse=True)
     return candidates_out[:_TOPK]
 
@@ -247,64 +181,17 @@ def run_daily_mobility_simulation(
     worker_count = int(cfg.simulation.get("num_workers", _detect_cpus() or 1))
     use_parallel = worker_count > 1
 
-    # [SHARED NETWORK SNAPSHOT] Pack the numeric fields PHASE 1 reads into
-    # arrays ONCE; workers fork-inherit them copy-on-write (~60 MB total,
-    # independent of worker count). BaseStation OBJECTS never leave the main
-    # process (phases 2-4 keep using them here).
+    # [SPATIAL] km-plane projection + per-cell coord array, built once and
+    # shipped to workers so each builds its own KD-tree.
     if base_stations:
         lat0 = float(sum(bs.lat for bs in base_stations) / len(base_stations))
     else:
         lat0 = 0.0
-    N = len(base_stations)
-    cells = np.empty((N, 13), dtype=np.float64)
-    site_ids = np.empty(N, dtype=np.int64)
-    scen_codes = np.empty(N, dtype=np.int16)
-    bs_ids = np.empty(N, dtype=np.int64)
-    scen_enums = tuple(DeploymentScenario)
-    scen_index = {sc: k for k, sc in enumerate(scen_enums)}
-    for i, bs in enumerate(base_stations):
-        az = getattr(bs, "sector_azimuth_deg", None)
-        cells[i, 0] = bs.lat
-        cells[i, 1] = bs.lon
-        cells[i, 2] = bs.coverage_radius_km
-        cells[i, 3] = bs.min_user_dist_m
-        cells[i, 4] = bs.interference_cutoff_m
-        cells[i, 5] = bs.p_tx_dbm
-        cells[i, 6] = bs.g_tx_dbi
-        cells[i, 7] = bs.carrier_freq_hz
-        cells[i, 8] = bs.total_bandwidth_hz
-        cells[i, 9] = bs.bs_height_m
-        cells[i, 10] = bs.shadow_sigma_los_db
-        cells[i, 11] = bs.shadow_sigma_nlos_db
-        cells[i, 12] = float("nan") if az is None else float(az)
-        site_ids[i] = int(getattr(bs, "site_id", -1))
-        scen_codes[i] = scen_index[bs.scenario]
-        bs_ids[i] = int(bs.bs_id)
-    cell_xy = np.column_stack([
-        np.radians(cells[:, 1]) * math.cos(math.radians(lat0)) * _R_EARTH_KM,
-        np.radians(cells[:, 0]) * _R_EARTH_KM,
-    ]) if N else np.zeros((0, 2))
-    max_cov_r_km = float(cells[:, 2].max()) if N else 0.0
-    max_intf_cutoff_m = float(cells[:, 4].max()) if N else 0.0
-    kd_tree = cKDTree(cell_xy) if (cKDTree is not None and N) else None
-
-    # EXPLICIT link-budget parameters — read from config with the SAME values
-    # the physics used until now; passed explicitly to every SINR call so no
-    # function default is silently relied upon. Override any of them under
-    # terrestrial.* in the YAML.
-    link_params = {
-        "serving_beamforming_gain_db":
-            float(cfg.terrestrial.get("serving_beamforming_gain_db", 12.0)),
-        "interferer_beamforming_suppression_db":
-            float(cfg.terrestrial.get("interferer_beamforming_suppression_db", 12.0)),
-        "body_loss_db": float(cfg.terrestrial.get("body_loss_db", 3.0)),
-        "noise_figure_db": float(cfg.terrestrial.get("noise_figure_db", 7.0)),
-        "noise_figure_fr2_db": float(cfg.terrestrial.get("noise_figure_fr2_db", 10.0)),
-        "implementation_loss_factor":
-            float(cfg.terrestrial.get("implementation_loss_factor", 0.65)),
-        "ue_height_m": float(cfg.terrestrial.get("ue_height_m", 1.5)),
-    }
-    print(f"   [link] explicit params: {link_params}", flush=True)
+    cell_xy = np.array(
+        [_project_km(bs.lat, bs.lon, lat0) for bs in base_stations],
+        dtype=np.float64) if base_stations else np.zeros((0, 2))
+    max_cov_r_km = max((bs.coverage_radius_km for bs in base_stations), default=0.0)
+    max_intf_cutoff_m = max((bs.interference_cutoff_m for bs in base_stations), default=0.0)
 
     hex_to_candidate_towers: Dict[str, List[BaseStation]] = {}
     for bs in base_stations:
@@ -331,19 +218,6 @@ def run_daily_mobility_simulation(
             "scenario": bs.scenario.name,
             "coverage_radius_km": bs.coverage_radius_km,
             "sector_azimuth_deg": getattr(bs, "sector_azimuth_deg", None),
-            "num_sectors": getattr(bs, "num_sectors", 1),
-            # full RF set -> the network can be RELOADED exactly from this CSV
-            # (terrestrial.load_bs_csv), incl. mmWave cells whose enum is UMI
-            # but whose RF differs (400 MHz / 28 GHz / 30 dBm).
-            "p_tx_dbm": bs.p_tx_dbm,
-            "g_tx_dbi": bs.g_tx_dbi,
-            "carrier_freq_hz": bs.carrier_freq_hz,
-            "bandwidth_hz": bs.total_bandwidth_hz,
-            "bs_height_m": bs.bs_height_m,
-            "shadow_sigma_los_db": bs.shadow_sigma_los_db,
-            "shadow_sigma_nlos_db": bs.shadow_sigma_nlos_db,
-            "interference_cutoff_m": bs.interference_cutoff_m,
-            "min_user_dist_m": bs.min_user_dist_m,
         } for bs in base_stations]).to_csv("base_stations.csv", index=False)
         print(f"\U0001f4be Saved {len(base_stations):,} base stations to base_stations.csv")
 
@@ -356,27 +230,18 @@ def run_daily_mobility_simulation(
 
     executor = None
     try:
-        # Globals FIRST (main process), THEN the pool: fork-children inherit
-        # the arrays/KD-tree copy-on-write. Nothing heavy goes through pickle.
-        _set_worker_network(cells, site_ids, scen_codes, bs_ids, scen_enums,
-                            link_params, g_rx_ue_dbi, lat0, kd_tree,
-                            max_cov_r_km, max_intf_cutoff_m)
-        # [MEM] Freeze the parent heap before forking: without this, each
-        # worker's cyclic GC walks ALL inherited objects (users, BS objects)
-        # and WRITES their GC headers, dirtying every copy-on-write page ->
-        # 250 silent copies of a multi-GB heap. freeze() moves existing
-        # objects to the permanent generation, which child GC never touches.
-        gc.collect()
-        gc.freeze()
         if use_parallel:
             executor = ProcessPoolExecutor(
                 max_workers=worker_count,
                 initializer=_init_attachment_worker,
+                initargs=(base_stations, g_rx_ue_dbi, lat0,
+                          cell_xy, max_cov_r_km, max_intf_cutoff_m),
             )
             print(f"\u2699\ufe0f  PHASE 1 parallelism enabled: {worker_count} worker processes "
-                  f"(fork-shared array snapshot, {len(base_stations):,} cells, "
-                  f"{cells.nbytes/1e6:.0f} MB shared).")
+                  f"(spatial KD-tree prefilter, {len(base_stations):,} cells).")
         else:
+            _init_attachment_worker(base_stations, g_rx_ue_dbi, lat0,
+                                    cell_xy, max_cov_r_km, max_intf_cutoff_m)
             print("\u2699\ufe0f  PHASE 1 running serially (num_workers <= 1).")
 
         for t_s in time_steps_s:
@@ -749,7 +614,7 @@ def run_daily_mobility_simulation(
 
             if user_animation_data:
                 pd.DataFrame(user_animation_data).to_csv("user_hourly_states.csv", mode='a', header=False, index=False)
-                user_animation_data.clear()
+                #user_animation_data.clear()
 
             if detailed_drop_log:
                 pd.DataFrame(detailed_drop_log).to_csv("detailed_drop_log.csv", mode='a', header=False, index=False)

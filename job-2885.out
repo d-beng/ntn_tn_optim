@@ -300,36 +300,48 @@ Number of tasks is 14,525,320. ⚡ Using a chunk size of 14583 for parallel proc
    Building real density map at H3 res 9 (cell area 0.105 km^2)...
    Density map: 185,464 populated cells.
    Discovery: 145,254 zones over 14,525,320 users on 250 cores...
-BLAS : Bad memory unallocation! :  640  0x7fdb2c2aa000
-BLAS : Bad memory unallocation! :  640  0x7fdb302aa000
-BLAS : Bad memory unallocation! :  640  0x7fdaac2aa000
-BLAS : Bad memory unallocation! :  640  0x7fda862aa000
-BLAS : Bad memory unallocation! :  640  0x7fda9c2aa000
-BLAS : Bad memory unallocation! :  640  0x7fda7a2aa000
-BLAS : Bad memory unallocation! :  640  0x7fda8c2aa000
-BLAS : Bad memory unallocation! :  640  0x7fda982aa000
-BLAS : Bad memory unallocation! :  640  0x7fda962aa000
-BLAS : Bad memory unallocation! :  640  0x7fda742aa000
-BLAS : Bad memory unallocation! :  640  0x7fda762aa000
-BLAS : Bad memory unallocation! :  640  0x7fda9e2aa000
-BLAS : Bad memory unallocation! :  640  0x7fdaa22aa000
-BLAS : Bad memory unallocation! :  640  0x7fda7c2aa000
-BLAS : Bad memory unallocation! :  640  0x7fda882aa000
-BLAS : Bad memory unallocation! :  640  0x7fda8a2aa000
-BLAS : Bad memory unallocation! :  640  0x7fdaa42aa000
-BLAS : Bad memory unallocation! :  640  0x7fda8e2aa000
-BLAS : Bad memory unallocation! :  640  0x7fda802aa000
+BLAS : Bad memory unallocation! :  640  0x7fd86a6f6000
+BLAS : Bad memory unallocation! :  640  0x7fd8646f6000
+BLAS : Bad memory unallocation! :  640  0x7fd8686f6000
+BLAS : Bad memory unallocation! :  640  0x7fd86e6f6000
+BLAS : Bad memory unallocation! :  640  0x7fd8166f6000
+BLAS : Bad memory unallocation! :  640  0x7fd8206f6000
+BLAS : Bad memory unallocation! :  640  0x7fd8246f6000
+BLAS : Bad memory unallocation! :  640  0x7fd81c6f6000
+BLAS : Bad memory unallocation! :  640  0x7fd81a6f6000
+BLAS : Bad memory unallocation! :  640  0x7fd7ca6f6000
+BLAS : Bad memory unallocation! :  640  0x7fd7cc6f6000
+BLAS : Bad memory unallocation! :  640  0x7fd7c86f6000
    Dense zones: 16,024 (875,739 users in sparse zones -> NTN). Running second pass in parallel...
    RMa backfill (geometric): 195,063 gap-users -> 5,181 RMa cells at 4.68 km spacing.
    Capacity cap [bw=300 MHz (cfg.constellation), se=1.77 bps/Hz, demand=0.395 Mbps/user (measured)]: one-beam capacity = 1347 users/cell; 0 beam-cells overflowed -> 0 RMa towers added, 0 users pulled onto TN so residual/cell <= cap.
-   Small-cell gap fill (RMa blanket IGNORED): 114,236 dense users outside small-cell coverage -> +0 UMI_MMW, +270 UMI, +1586 UMA (min 20 users/cell, normal lattice spacing).
-   mmWave overlay (400 MHz n257, density >= 3000): 60,359 UMI_MMW cells over 8,538,300 ultra-dense-core users (capacity layer over existing coverage).
- TN placement complete: 576288 base stations (scenario mix: {'UMI': 511365, 'UMA': 34692, 'RMA': 30231}); 16024 dense zones; 875,739 users in sparse zones (-> NTN); 144422 overlapping towers suppressed (overlap_factor=0.1). REAL density people/km^2: p25=2174 median=3655 p75=5155 max=11041.
+   Small-cell gap fill (RMa blanket IGNORED): 114,236 dense users outside small-cell coverage -> +270 UMI, +1586 UMA (min 20 users/cell, normal lattice spacing).
+   mmWave overlay (400 MHz n257, density >= 7500): 7,990 UMI_MMW cells over 1,649,640 ultra-dense-core users (capacity layer over existing coverage).
+ TN placement complete: 419181 base stations (scenario mix: {'UMI': 354258, 'UMA': 34692, 'RMA': 30231}); 16024 dense zones; 875,739 users in sparse zones (-> NTN); 144422 overlapping towers suppressed (overlap_factor=0.1). REAL density people/km^2: p25=1718 median=3389 p75=5269 max=11041.
 
 [Phase 4] Initiating 24-Hour Mobility & Traffic Engine...
 
 Starting RF-Accurate Hybrid Mobility Simulation (Strict 3GPP Admission Control)...
-💾 Saved 576,288 base stations to base_stations.csv
+   [link] explicit params: {'serving_beamforming_gain_db': 12.0, 'interferer_beamforming_suppression_db': 12.0, 'body_loss_db': 3.0, 'noise_figure_db': 7.0, 'noise_figure_fr2_db': 10.0, 'implementation_loss_factor': 0.65, 'ue_height_m': 1.5}
+💾 Saved 419,181 base stations to base_stations.csv
 📁 Initializing chunked CSV log files...
-⚙️  PHASE 1 parallelism enabled: 250 worker processes (spatial KD-tree prefilter, 576,288 cells).
-Results staged to: /Utilisateurs/dbenguer/ntn_tn_optim//results/job-2577
+⚙️  PHASE 1 parallelism enabled: 250 worker processes (fork-shared array snapshot, 419,181 cells, 44 MB shared).
+   [se/sinr] served-TN medians by tier:
+        UMI: n=8,622,763  SE= 5.01 bps/Hz  SINR=  23.2 dB
+        UMA: n=1,165,491  SE= 5.27 bps/Hz  SINR=  24.4 dB
+        RMA: n=1,688,915  SE= 5.68 bps/Hz  SINR=  26.3 dB
+        ALL: n=11,477,169  SE= 5.12 bps/Hz  SINR=  23.7 dB
+   [se/sinr] wrote cell_se_sinr.csv (1,027 cells).
+   [util] wrote bs_sector_utilisation.csv (419,181 cells) and site_utilisation.csv (139,727 sites); 4,154 cells at >=99% utilisation (mean cell util 4.7%).
+   [ntn] wrote ntn_cell_demand.csv: 842 cells need NTN; one-beam cap = 531 Mbps; 31 cells (3.7%) exceed one beam (these hold 0.043 Tbps of the spillover); median beams_needed = 0.01, max = 5.0.
+  [t=72000s | 20.0h] Demand: 5737169.5 | TN Served: 5553986.8 | NTN Served: 54767.6 | Dropped: 13693.1 Mbps
+
+✅ Simulation Complete. Generated all export files.
+
+🎨 Rendering Unified God-Mode Visualization (Compiling frames...)
+✅ Master Visualization compiled successfully and saved to Final_Animation.html
+
+🎉 SIMULATION COMPLETE. Check output directories for CSV exports.
+==================================================
+
+Results staged to: /Utilisateurs/dbenguer/ntn_tn_optim//results/job-2885
