@@ -1,8 +1,8 @@
-total_city_users: 6960
-total_rural_users: 1040
+total_city_users: 8700
+total_rural_users: 1300
 city_scatter_std_dev: 0.15
 rural_scatter_std_dev: 0.05
-use_worldpop: True
+use_worldpop: False
 worldpop_tif_path: "/Utilisateurs/dbenguer/ntn_tn_optim/data/raw/can_pop_2021_CN_100m_R2025A_v1.tif"
 worldpop_tif_restricted: False
 
