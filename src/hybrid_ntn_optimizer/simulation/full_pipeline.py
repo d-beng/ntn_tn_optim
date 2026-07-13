@@ -410,7 +410,7 @@ def run_daily_mobility_simulation(
             # ==================================================
             # PHASE 1: CELL ATTACHMENT  [PARALLEL + SPATIAL]
             # ==================================================
-            active_users = [u for u in users if u.current_demand >= 0.1]
+            active_users = [u for u in users if u.current_demand >= 0.0]
             payload = [(u.current_lat, u.current_lon) for u in active_users]
 
             if active_users:
@@ -632,7 +632,7 @@ def run_daily_mobility_simulation(
             # ==================================================
             for u in users:
                 unmet = u.current_demand - u.served_mbps
-                if unmet > 0.1 and not getattr(u, 'locked_to_tn', False):
+                if unmet > 0.0 and not getattr(u, 'locked_to_tn', False):
                     if u.current_h3_id not in unmet_demand_ledger:
                         unmet_demand_ledger[u.current_h3_id] = []
                     unmet_demand_ledger[u.current_h3_id].append(
@@ -693,7 +693,7 @@ def run_daily_mobility_simulation(
                 for entry in u_list:
                     if entry["unmet_mbps"] < entry["initial_unmet"]:
                         entry["user"].coverage_type = "LEO"
-                    elif entry["unmet_mbps"] > 0.1 and entry["user"].coverage_type != "TN":
+                    elif entry["unmet_mbps"] > 0.0 and entry["user"].coverage_type != "TN":
                         entry["user"].coverage_type = "DROPPED"
 
             for u in users:
@@ -719,7 +719,7 @@ def run_daily_mobility_simulation(
                         "State": u.coverage_type
                     })
 
-                if u.current_demand > 0.1:
+                if u.current_demand > 0.0:
                     detailed_drop_log.append({
                         "Time_s": t_s,
                         "Hour": round(absolute_hour, 2),
