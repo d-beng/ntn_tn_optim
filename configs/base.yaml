@@ -11,7 +11,7 @@ defaults:
 epoch_utc: "2024-01-01T00:00:00"
 random_seed: 42
 simulation:
-  duration_s: 72000         # 24 hours (86400 in seconds)
+  duration_s: 86400         # 24 hours (86400 in seconds) 72000 for hour 20 only
   time_step_s: 3600         # 1 hour per step
   beam_capacity_mbps: 500.0 
   allow_spillover: False           # Allow users to connect to BSs outside their coverage if they have demand and the BS has capacity

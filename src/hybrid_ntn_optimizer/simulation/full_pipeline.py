@@ -241,7 +241,7 @@ def run_daily_mobility_simulation(
 
     duration_s = cfg.simulation.get("duration_s", 86400)
     time_step_s = cfg.simulation.get("time_step_s", 3600)
-    time_steps_s = list(range(20 * 3600, duration_s + time_step_s, time_step_s))
+    time_steps_s = list(range(0 * 3600, duration_s + time_step_s, time_step_s))
     allow_spillover = cfg.simulation.get("allow_spillover", True)
 
     worker_count = int(cfg.simulation.get("num_workers", _detect_cpus() or 1))
@@ -749,11 +749,13 @@ def run_daily_mobility_simulation(
 
             if user_animation_data:
                 pd.DataFrame(user_animation_data).to_csv("user_hourly_states.csv", mode='a', header=False, index=False)
-                user_animation_data.clear()
+                if cfg.population.get("use_worldpop", False):
+                    user_animation_data.clear()
 
             if detailed_drop_log:
                 pd.DataFrame(detailed_drop_log).to_csv("detailed_drop_log.csv", mode='a', header=False, index=False)
-                detailed_drop_log.clear()
+                if cfg.population.get("use_worldpop", False):
+                    detailed_drop_log.clear()
 
             summary_data.append({
                 "Time_s": t_s, "Hour": round(hour_of_day, 2),
