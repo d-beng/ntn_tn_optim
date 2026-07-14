@@ -1,4 +1,0 @@
-/Utilisateurs/dbenguer/ntn_tn_optim/reconstruct_hour20.py:158: DeprecationWarning: *scattermapbox* is deprecated! Use *scattermap* instead. Learn more at: https://plotly.com/python/mapbox-to-maplibre/
-  traces.append(go.Scattermapbox(
-/Utilisateurs/dbenguer/ntn_tn_optim/reconstruct_hour20.py:192: DeprecationWarning: *scattermapbox* is deprecated! Use *scattermap* instead. Learn more at: https://plotly.com/python/mapbox-to-maplibre/
-  traces.append(go.Scattermapbox(
