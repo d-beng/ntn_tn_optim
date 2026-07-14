@@ -1,5 +1,0 @@
-OpenBLAS warning: precompiled NUM_THREADS exceeded, adding auxiliary array for thread metadata.
-To avoid this warning, please rebuild your copy of OpenBLAS with a larger NUM_THREADS setting
-or set the environment variable OPENBLAS_NUM_THREADS to 64 or lower
-/var/spool/slurm/d/job02577/slurm_script : ligne 96 : 758667 Processus arrêté      python scenario.py
-[2026-07-09T00:06:48.588] error: Detected 1 oom_kill event in StepId=2577.batch. Some of the step tasks have been OOM Killed.
