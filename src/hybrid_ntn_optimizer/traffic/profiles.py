@@ -321,7 +321,7 @@ def generate_users(cfg: DictConfig, region: Region) -> List[User]:
                         users.append(spawned_user)
                             
         print("✅ WorldPop generation complete!", flush=True)
-    _dump_users(users, path="/Utilisateurs/dbenguer/ntn_tn/data/users.pkl")
+    _dump_users(users, path="/Utilisateurs/dbenguer/ntn_tn_optim/data/users.pkl")
     return users
 
 def _build_user_profile(uid: int, lat: float, lon: float, res: int, cfg: DictConfig, boundary_polygon) -> User:

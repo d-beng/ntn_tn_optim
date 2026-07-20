@@ -2,7 +2,7 @@ total_city_users: 8700
 total_rural_users: 1300
 city_scatter_std_dev: 0.15
 rural_scatter_std_dev: 0.05
-use_worldpop: False
+use_worldpop: True
 worldpop_tif_path: "/Utilisateurs/dbenguer/ntn_tn_optim/data/raw/can_pop_2021_CN_100m_R2025A_v1.tif"
 worldpop_tif_restricted: False
 
@@ -62,12 +62,12 @@ traffic:
       max_mbps: 25.0
       
   diurnal_curve:
-    base_traffic_multiplier: 0.2 #0.0122
+    base_traffic_multiplier: 0.0122
     noon_peak:
       center_hour: 12.0
       width_hours: 3.0
-      height_multiplier: 0.5 #0.0285
+      height_multiplier: 0.0285
     evening_peak:
       center_hour: 20.0
       width_hours: 2.5
-      height_multiplier: 1.0 #0.058
+      height_multiplier: 0.058
