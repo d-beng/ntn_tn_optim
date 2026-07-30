@@ -60,6 +60,14 @@ def default_oracle_factory(inst: Instance, se_fn, rho_dep: float = 0.95):
     return oracle
 
 
+def _two_arg_oracle(fn):
+    import inspect
+    try:
+        return len(inspect.signature(fn).parameters) >= 2
+    except Exception:
+        return False
+
+
 def solve_iterative(inst: Instance,
                     oracle,                       # y -> realized elig_se
                     lam: float = 100.0,
@@ -70,26 +78,33 @@ def solve_iterative(inst: Instance,
                     mip_gap: float = 0.02,
                     time_limit_s: float = 600.0,
                     threads: int = 0,
+                    solver_fn=None,               # default solve_hex
+                    solve_kwargs: dict | None = None,
                     log: bool = True):
     history = []
     prev_served = None
     t0 = time.time()
 
+    _solver = solver_fn or solve_hex
+    _kw = dict(solve_kwargs or {})
     for it in range(1, max_iter + 1):
-        res = solve_hex(inst, lam=lam, c_beam=c_beam,
-                        mip_gap=mip_gap, time_limit_s=time_limit_s,
-                        threads=threads, log=False)
+        res = _solver(inst, lam=lam, c_beam=c_beam,
+                      mip_gap=mip_gap, time_limit_s=time_limit_s,
+                      threads=threads, log=False, **_kw)
         served = res["served_tn_mbps"] + res["ntn_mbps"]
+        mean_se = float(np.mean([se for row in inst.elig_se for se in row])) \
+            if inst.elig_se else 0.0
         history.append({
-            "iter": it, "objective": res["objective"],
+            "iter": it, "mean_se": mean_se, "objective": res["objective"],
             "served_pct": res["served_pct"], "beams": res["beams"],
             "opened": dict(res["opened"]), "gap": res["gap"],
             "wall_s": res["wall_s"],
         })
         if log:
             print(f"  [iter {it}] served={res['served_pct']:.2f}%  "
-                  f"obj={res['objective']:.0f}  opened={res['opened']}  "
-                  f"beams={res['beams']}  ({res['wall_s']:.0f}s)", flush=True)
+                  f"obj={res['objective']:.0f}  mean_SE={mean_se:.2f}  "
+                  f"opened={res['opened']}  beams={res['beams']}  "
+                  f"({res['wall_s']:.0f}s)", flush=True)
 
         if prev_served is not None and \
            abs(served - prev_served) <= stab_tol * max(prev_served, 1e-9):
@@ -100,7 +115,21 @@ def solve_iterative(inst: Instance,
         prev_served = served
 
         # ---- oracle correction (damped) ----------------------------------
-        realized = oracle(res["y"])
+        # A simulator-in-the-loop oracle returns (realised_se, rho_per_site);
+        # the analytic oracle returns just realised_se.
+        out = oracle(res["y"], res.get("x_assign")) \
+            if _two_arg_oracle(oracle) else oracle(res["y"])
+        if isinstance(out, tuple):
+            realized, rho = out[0], (out[1] if len(out) > 1 else None)
+            if rho:
+                prev = _kw.get("cap_factor") or {}
+                merged = dict(prev)
+                for j, r in rho.items():          # damped, same as eta
+                    merged[j] = (1.0 - damping) * prev.get(j, 1.0) \
+                        + damping * float(r)
+                _kw["cap_factor"] = merged
+        else:
+            realized = out
         for u in range(len(inst.dem_mbps)):
             inst.elig_se[u] = [
                 (1.0 - damping) * se0 + damping * ser
@@ -108,4 +137,5 @@ def solve_iterative(inst: Instance,
             ]
 
     history[-1]["total_wall_s"] = time.time() - t0
+    res["history"] = history
     return res, history

@@ -1,0 +1,10 @@
+- workers=200
+- +solve_time_limit=10800
+- +dens_uma=0
+- +dens_umi=0
+- +k_elig=12
+- +agg_res=10
+- +agg_safety=0.25
+- +rho_dep=0.95
+- +calibrate=true
+- +outage_budget_mbps=0

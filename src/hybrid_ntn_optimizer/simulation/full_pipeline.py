@@ -241,7 +241,7 @@ def run_daily_mobility_simulation(
 
     duration_s = cfg.simulation.get("duration_s", 86400)
     time_step_s = cfg.simulation.get("time_step_s", 3600)
-    time_steps_s = list(range(0 * 3600, duration_s + time_step_s, time_step_s))
+    time_steps_s = list(range(20 * 3600, duration_s + time_step_s, time_step_s))
     allow_spillover = cfg.simulation.get("allow_spillover", True)
 
     worker_count = int(cfg.simulation.get("num_workers", _detect_cpus() or 1))

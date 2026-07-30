@@ -1,0 +1,8 @@
+- workers=200
+- +solve_time_limit=5400
+- +dens_uma=0
+- +dens_umi=0
+- +k_elig=8
+- +agg_res=10
+- +agg_safety=1.0
+- +calibrate=true

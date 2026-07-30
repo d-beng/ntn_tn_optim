@@ -15,7 +15,7 @@ Outputs:
      for the validation step)
 
 Place this file next to candidate_generator.py and hex_milp.py, with
-PYTHONPATH including your package src ("/home/db3n/Documents/Ph.D./Courses/ntn_tn_test/ntn_tn_optim-master_2/src").
+PYTHONPATH including your package src ("/Utilisateurs/dbenguer/ntn_tn_optim/src").
 """
 from __future__ import annotations
 import argparse, math, pickle, sys, time
@@ -23,6 +23,7 @@ from collections import Counter
 
 import numpy as np
 import h3
+from omegaconf import DictConfig
 import yaml
 
 from candidate_generator import build_instance, Tier
@@ -32,15 +33,20 @@ from hex_milp import solve_hex
 # ---------------------------------------------------------------------------
 # 1. Tiers from YOUR 5g_base.yaml (single source of truth — no copies)
 # ---------------------------------------------------------------------------
-TIER_COSTS   = {"RMA": 2.0, "UMA": 2.5, "UMI": 1.0, "UMI_MMW": 1.2}
+TIER_COSTS = {   # annualised TCO USD/yr, 5% discount / 10-yr life.
+                 # Kumar & Oughton, Front. Comput. Sci. 5:1191853 (2023)
+                 # Table 4 (via Oughton & Frias 2018; Oughton & Lehr 2022):
+                 #   macro upgrade 45k/site, small cell 12k/site,
+                 #   backhaul 10k/5k USD *per km*, OPEX 2.5k/0.8k per yr.
+                 # Greenfield tower civil cost is NOT in that table and is
+                 # a CONSTRUCTED estimate -- see cost_model.py and sweep it.
+    "RMA": 38114.0, "UMA": 13249.0, "UMI": 2937.0, "UMI_MMW": 3714.0}
 # density gates: your res-9 rescaled thresholds (override via CLI)
 TIER_DENSMIN = {"RMA": 0.0, "UMA": 1600.0, "UMI": 4000.0, "UMI_MMW": 15000.0}
 
-def load_tiers(cfg_path: str, dens_uma: float, dens_umi: float,
+def load_tiers(cfg_path: DictConfig, dens_uma: float, dens_umi: float,
                dens_mmw: float) -> tuple:
-    with open(cfg_path) as f:
-        cfg = yaml.safe_load(f)
-    scen = cfg["scenarios"]
+    scen = cfg_path
     TIER_DENSMIN.update({"UMA": dens_uma, "UMI": dens_umi, "UMI_MMW": dens_mmw})
     tiers = []
     for name in ["RMA", "UMA", "UMI", "UMI_MMW"]:
@@ -67,11 +73,10 @@ def load_tiers(cfg_path: str, dens_uma: float, dens_umi: float,
 #    = 6 co-tier interferers on a ring at the design ISD; shadowing sigmas
 #    set to 0 so planning coefficients are deterministic expectations)
 # ---------------------------------------------------------------------------
-def make_real_se_fn(cfg_path: str, rho_dep: float = 0.95):
+def make_real_se_fn(cfg_path: DictConfig, rho_dep: float = 0.95):
     from hybrid_ntn_optimizer.link_budget.sinr import calculate_tn_sinr_capacity
     from hybrid_ntn_optimizer.models.base_station import DeploymentScenario
-    with open(cfg_path) as f:
-        scen_cfg = yaml.safe_load(f)["scenarios"]
+    scen_cfg = cfg_path
 
     cache: dict = {}
 
@@ -128,8 +133,8 @@ def extract_hex(users_path: str, hex_id: str | None, halo_km: float,
         users = pickle.load(f)
     print(f"  loaded {len(users):,} users in {time.time()-t0:.0f}s", flush=True)
 
-    lats = np.array([u.current_lat for u in users])
-    lons = np.array([u.current_lon for u in users])
+    lats = np.array([u.lat for u in users])
+    lons = np.array([u.lon for u in users])
 
     cells = [h3.latlng_to_cell(float(a), float(b), 5)
              for a, b in zip(lats, lons)]
@@ -162,8 +167,8 @@ def extract_hex(users_path: str, hex_id: str | None, halo_km: float,
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--users",  default="/home/db3n/Documents/Ph.D./Courses/ntn_tn_test/ntn_tn_optim-master_2/data/users.pkl")
-    ap.add_argument("--config", default="/home/db3n/Documents/Ph.D./Courses/ntn_tn_test/ntn_tn_optim-master_2/configs/terrestrial/5g_base.yaml")
+    ap.add_argument("--users",  default="/Utilisateurs/dbenguer/ntn_tn_optim/data/users.pkl")
+    ap.add_argument("--config", default="/Utilisateurs/dbenguer/ntn_tn_optim/configs/5g_base.yaml")
     ap.add_argument("--hex",    default=None, help="H3 res-5 id (default: densest)")
     ap.add_argument("--halo-km",   type=float, default=2.847)
     ap.add_argument("--rho-cand",  type=float, default=1.0)

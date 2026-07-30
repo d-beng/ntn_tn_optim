@@ -69,6 +69,8 @@ Final_Animation.html
 user_hourly_states.csv
 detailed_drop_log.csv
 users_initial_state.csv
+*.csv
+
 
 # Flask stuff:
 instance/

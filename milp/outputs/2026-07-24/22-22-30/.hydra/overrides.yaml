@@ -1,0 +1,6 @@
+- workers=200
+- +solve_time_limit=5400
+- +dens_uma=0
+- +dens_umi=0
+- +k_elig=12
+- +calibrate=false

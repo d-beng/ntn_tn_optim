@@ -80,6 +80,7 @@ greenlet
 gto
 h11
 h3
+highspy
 httpcore
 httpx
 hydra-core

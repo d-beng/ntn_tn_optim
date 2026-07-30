@@ -1,0 +1,7 @@
+- workers=110
+- +solve_time_limit=5400
+- +drop_target=1400
+- +drop_iters=3
+- +dens_uma=0
+- +dens_umi=0
+- +k_elig=12

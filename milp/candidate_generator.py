@@ -47,10 +47,10 @@ class Tier:
     density_min: float          # people/km^2 to be a candidate zone
 
 DEFAULT_TIERS = (
-    Tier("RMA",     700e6,  20e6, 2.847, 46.0, 15.0, 35.0, cost=2.0, density_min=0.0),
-    Tier("UMA",     3.5e9, 100e6, 0.474, 46.0, 17.0, 25.0, cost=2.5, density_min=400.0),
-    Tier("UMI",     3.5e9, 100e6, 0.311, 38.0, 10.0, 10.0, cost=1.0, density_min=1000.0),
-    Tier("UMI_MMW",  28e9, 400e6, 0.150, 30.0, 23.0, 10.0, cost=1.2, density_min=7500.0),
+    Tier("RMA",     700e6,  20e6, 2.847, 46.0, 15.0, 35.0, cost=38114.0, density_min=0.0),
+    Tier("UMA",     3.5e9, 100e6, 0.474, 46.0, 17.0, 25.0, cost=13249.0, density_min=400.0),
+    Tier("UMI",     3.5e9, 100e6, 0.311, 38.0, 10.0, 10.0, cost=2937.0, density_min=1000.0),
+    Tier("UMI_MMW",  28e9, 400e6, 0.150, 30.0, 23.0, 10.0, cost=3714.0, density_min=7500.0),
 )
 
 def band_of(tier: Tier) -> str:
@@ -140,6 +140,8 @@ class Instance:
     elig_sec: list             # [ [sector 0/1/2,...] per u ] geometric wedge
     # conflicts
     conflict_pairs: np.ndarray # (P,2) candidate index pairs
+    beam_cap_of: dict          # hex_id -> usable beam capacity [Mbps] in THIS
+                               # model (owned hex: full; foreign: residual)
     # cross-hex pass-2 support
     fixed_open: np.ndarray     # (J,) bool: neighbor-owned sites forced open
     ext_residual: dict         # j -> [mhz]*3 residual per sector for those
@@ -151,10 +153,32 @@ def build_instance(user_lat, user_lon, user_mbps,
                    hex_id: str,
                    tiers=DEFAULT_TIERS,
                    se_fn=se_default,
+                   beam_residual=None,  # {hex_id: Mbps} remaining beam capacity
+                                        # for FOREIGN hexes (owned hex keeps full
+                                        # C_beam). Prevents the same physical beam
+                                        # being spent by several hex solves.
                    ext_sites=None,   # neighbor-owned OPEN sites: list of dicts
                                      # {lat, lon, tier_name, residual_mhz:[3]}
                                      # appear as cost-0 fixed-open candidates
                                      # with per-sector RESIDUAL capacity
+                   extra_cand=None,  # ADAPTIVE ENRICHMENT: [(lat, lon,
+                                     # tier_name)] extra candidates injected
+                                     # as normal payable candidates. Used by
+                                     # zero_drop_solver to densify exactly
+                                     # where zero-outage proved infeasible,
+                                     # instead of guessing with density gates.
+                   agg_safety: float = 1.0,  # DEMAND-AGGREGATION COVERAGE FIX.
+                                     # Eligibility is tested at the res-`agg_res`
+                                     # CENTROID, but a real user sits anywhere in
+                                     # that hexagon -- up to its circumradius
+                                     # (201 m at res 9) away. A UMi (R=311 m)
+                                     # therefore only GUARANTEES coverage within
+                                     # 311-201 = 110 m of itself, 13% of the area
+                                     # the model assumes. Effective radius is
+                                     # shrunk by agg_safety * circumradius:
+                                     #   1.0 = every user in the demand point is
+                                     #         guaranteed in range (conservative)
+                                     #   0.0 = old behaviour (centroid only)
                    rho_cand: float = 0.30,
                    rho_dep: float = 0.95,
                    agg_res: int = 9,
@@ -200,6 +224,36 @@ def build_instance(user_lat, user_lon, user_mbps,
     cand_tier = np.concatenate(cand_t).astype(np.int32)
     cand_cost = np.concatenate(cand_c)
 
+    # ---- adaptive enrichment: candidates the SOLVER asked for ---------------
+    if extra_cand:
+        name_to_t = {t.name: i for i, t in enumerate(tiers)}
+        ex, ey, et = [], [], []
+        for (la, lo, tname) in extra_cand:
+            if tname not in name_to_t:
+                continue
+            px, py = project_km(np.array([la]), np.array([lo]), lat0)
+            ex.append(float(px[0])); ey.append(float(py[0]))
+            et.append(name_to_t[tname])
+        if ex:
+            add_xy = np.column_stack([np.array(ex), np.array(ey)])
+            # drop near-duplicates of existing candidates (same tier, <25 m)
+            keep = []
+            for i in range(len(ex)):
+                same = cand_tier == et[i]
+                if same.any():
+                    d = np.hypot(cand_xy[same, 0] - add_xy[i, 0],
+                                 cand_xy[same, 1] - add_xy[i, 1])
+                    if d.min() < 0.025:
+                        continue
+                keep.append(i)
+            if keep:
+                add_xy = add_xy[keep]
+                add_t = np.array([et[i] for i in keep], dtype=np.int32)
+                cand_xy = np.vstack([cand_xy, add_xy])
+                cand_tier = np.concatenate([cand_tier, add_t])
+                cand_cost = np.concatenate(
+                    [cand_cost, np.array([tiers[t].cost for t in add_t])])
+
     # append neighbor-owned external sites (fixed open, zero cost, residual W)
     tier_index = {t.name: i for i, t in enumerate(tiers)}
     n_own = len(cand_tier)
@@ -235,6 +289,10 @@ def build_instance(user_lat, user_lon, user_mbps,
     dem_mbps = np.array([agg[c] for c in dem_cells])
     dem_hex = [h3.cell_to_parent(c, 5) for c in dem_cells]
 
+    # effective coverage radius per tier, corrected for demand aggregation
+    _circ = h3.average_hexagon_edge_length(agg_res, unit="km") * agg_safety
+    _r_eff = [max(t.radius_km - _circ, 0.02) for t in tiers]
+
     # -- eligibility: K best candidates (by SE) within radius ---------------
     # For each (demand point, candidate) pair we also record WHICH 120-degree
     # sector of the site serves the point (3GPP boresights 30/150/270 deg;
@@ -257,7 +315,7 @@ def build_instance(user_lat, user_lon, user_mbps,
         for j in near:
             t = tiers[cand_tier[j]]
             d = float(np.hypot(*(cand_xy[j] - dem_xy[i])))
-            if d > t.radius_km:
+            if d > _r_eff[cand_tier[j]]:
                 continue
             se = se_fn(d, t)
             if se >= se_min:
@@ -287,15 +345,25 @@ def build_instance(user_lat, user_lon, user_mbps,
                 dmin = min(ta.radius_km, tb.radius_km) * math.sqrt(3.0) * rho_dep
                 if np.hypot(*(cand_xy[ja] - cand_xy[jb])) < dmin:
                     conflicts.append((ja, jb))
+    # drop conflicts between TWO fixed-open external sites: both are already
+    # built by neighbouring hexes (pass-1 solved them independently), so their
+    # proximity is a fact, not a decision — pass 2 must not become infeasible
+    # over it. The interference cost is priced by the oracle/simulator.
+    conflicts = [(a, b) for (a, b) in conflicts
+                 if not (fixed_open[a] and fixed_open[b])]
     conflict_pairs = np.array(sorted(set(conflicts)), dtype=np.int64) \
         if conflicts else np.zeros((0, 2), dtype=np.int64)
 
     hex_ids = [hex_id] + sorted({h for h in dem_hex if h != hex_id})
+    _cap = beam_bw_hz * beam_se / 1e6
+    beam_cap_of = {h: (_cap if h == hex_id
+                       else float((beam_residual or {}).get(h, _cap)))
+                   for h in hex_ids}
     return Instance(cand_xy=cand_xy, cand_tier=cand_tier, cand_cost=cand_cost,
                     cand_owner_hex=cand_owner, tiers=tuple(tiers), lat0=lat0,
                     dem_xy=dem_xy, dem_mbps=dem_mbps, dem_hex=dem_hex,
                     elig_j=elig_j, elig_se=elig_se, elig_sec=elig_sec,
-                    conflict_pairs=conflict_pairs,
+                    conflict_pairs=conflict_pairs, beam_cap_of=beam_cap_of,
                     fixed_open=fixed_open, ext_residual=ext_residual,
                     hex_ids=hex_ids,
                     beam_cap_mbps=beam_bw_hz * beam_se / 1e6)
