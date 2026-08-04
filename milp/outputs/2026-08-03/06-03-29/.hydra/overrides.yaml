@@ -1,0 +1,13 @@
+- workers=200
+- +solver_threads=64
+- +solve_time_limit=21600
+- +dens_uma=0
+- +dens_umi=0
+- +k_elig=12
+- +agg_res=11
+- +agg_safety=0.0
+- +rho_dep=0.75
+- +rho_cand=0.85
+- +disaggregate_linking=false
+- +calibrate=true
+- +outage_budget_mbps=0

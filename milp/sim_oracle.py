@@ -1,28 +1,62 @@
 #!/usr/bin/env python3
 """
-sim_oracle.py — the REAL oracle for the iterative loop on the cluster:
+sim_oracle.py — planning-granularity physics oracle for the iterative loop:
 given a placement y, recompute each eligible (demand point, candidate)
-spectral efficiency with your actual TR 38.901 link budget and the ACTUAL
-set of opened interferers (instead of the nominal 6-ring of Assumption 1).
+spectral efficiency with the actual TR 38.901 link budget and the ACTUAL set
+of opened interferers (instead of the nominal 6-ring of Assumption 1).
 
-This is the planning-granularity version of "run the simulator": it uses
-your calculate_tn_sinr_capacity with the true deployed interferer geometry.
-The full-simulator validation (mobility, PF scheduling, per-user association)
-remains the final a-posteriori check via milp_placement_<hex>.csv.
+This is the cheap oracle. The expensive one -- the full system-level
+simulator with mobility, PF scheduling and per-user association -- lives in
+real_sim_oracle.py.
 
-Usage in run_real_tile.py / iterative run:
+FIX IN THIS REVISION
+--------------------
+make_sim_oracle() took `cfg_path` and did `yaml.safe_load(open(path))["scenarios"]`.
+province_solver._get_oracle passes the already-composed DictConfig scenarios
+object, so this raised, was swallowed by the bare `except Exception`, and the
+province run silently degraded to the ANALYTIC PROXY -- while still printing
+"real physics" on the first worker to get there. It now accepts either a
+mapping or a path, and the caller sees a real error if neither works.
+
+Usage:
     from sim_oracle import make_sim_oracle
-    oracle = make_sim_oracle(inst, cfg_path)
+    oracle = make_sim_oracle(inst, cfg.terrestrial.scenarios)
     res, hist = solve_iterative(inst, oracle, ...)
 """
 from __future__ import annotations
 import math
+import os
 import numpy as np
 from scipy.spatial import cKDTree
-import yaml
 
 
-def make_sim_oracle(inst, cfg_path: str,
+def _as_scenarios(scen_or_path):
+    """Accept a scenarios mapping (dict / DictConfig) OR a path to a YAML."""
+    if scen_or_path is None:
+        raise ValueError("make_sim_oracle: no scenarios config given")
+    if isinstance(scen_or_path, (str, bytes, os.PathLike)):
+        import yaml
+        with open(scen_or_path) as f:
+            doc = yaml.safe_load(f)
+        scen = (doc.get("terrestrial", {}) or {}).get("scenarios") \
+            or doc.get("scenarios")
+        if not scen:
+            raise ValueError(
+                f"make_sim_oracle: no 'scenarios' block in {scen_or_path}. "
+                f"If this is a Hydra root config its defaults: list is NOT "
+                f"resolved by yaml.safe_load -- compose it and pass "
+                f"cfg.terrestrial.scenarios instead.")
+        return scen
+    # already a mapping-like object
+    if "RMA" in scen_or_path or "UMI" in scen_or_path:
+        return scen_or_path
+    if "scenarios" in scen_or_path:
+        return scen_or_path["scenarios"]
+    raise ValueError("make_sim_oracle: object passed is neither a scenarios "
+                     "mapping nor a config containing one")
+
+
+def make_sim_oracle(inst, scen_or_path,
                     g_rx_ue_dbi: float = 0.0,
                     serving_bf_db: float = 12.0,
                     intf_suppression_db: float = 12.0,
@@ -30,12 +64,12 @@ def make_sim_oracle(inst, cfg_path: str,
                     nf_db: float = 7.0,
                     nf_fr2_db: float = 10.0,
                     impl_loss: float = 0.65,
-                    ue_h_m: float = 1.5):
+                    ue_h_m: float = 1.5,
+                    cutoff_km: float = 5.0):
     from hybrid_ntn_optimizer.link_budget.sinr import calculate_tn_sinr_capacity
     from hybrid_ntn_optimizer.models.base_station import DeploymentScenario
 
-    with open(cfg_path) as f:
-        scen_cfg = yaml.safe_load(f)["scenarios"]
+    scen_cfg = _as_scenarios(scen_or_path)
 
     tiers = inst.tiers
     scen_of = {}
@@ -44,12 +78,11 @@ def make_sim_oracle(inst, cfg_path: str,
         scen_of[ti] = DeploymentScenario[enum_key]
 
     def oracle(y: np.ndarray):
-        open_idx = np.where(y)[0]
+        open_idx = np.where(np.asarray(y, dtype=bool))[0]
         realized = []
         if len(open_idx) == 0:
             return [list(se) for se in inst.elig_se]
         tree = cKDTree(inst.cand_xy[open_idx])
-        cutoff_km = 5.0     # interference horizon (matches sim cutoffs)
 
         for u in range(len(inst.dem_mbps)):
             du = inst.dem_xy[u]

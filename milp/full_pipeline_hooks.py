@@ -9,7 +9,7 @@ step at hour 20 (duration_s=72000, time_step_s=3600 -> the pipeline's own
 
 Nothing about the physics is reimplemented here: attachment, admission
 control, PF scheduling, NTN beam allocation and drop accounting are the
-simulator's own code paths. This module only exists so the MILP loop has one
+simulator's own code paths. This module exists so the MILP loop has one
 stable call site and ONE place where the User field names live.
 
 FIELD NAMES verified from a live run (smoke test [D], 2026-07):
@@ -20,6 +20,11 @@ FIELD NAMES verified from a live run (smoke test [D], 2026-07):
     tn_reason            str   "Fully Served" / drop reason
     coverage_type        str   "TN" | "NTN" | ...
     tn_sinr_db, tn_I_dbm, tn_N_dbm, tn_num_interferers, tn_eval_hz
+
+NOTE on `dropped`: it is a SHORTFALL flag (served < demand), not a binary
+attach/no-attach flag. A partially served user counts as dropped for the
+amount it is short, which is what the drop-targeted loop provisions against.
+The relative tolerance stops float noise from flagging fully served users.
 """
 from __future__ import annotations
 import re
@@ -27,6 +32,7 @@ import re
 import numpy as np
 
 _BS_NUM = re.compile(r"(\d+)")
+_REL_TOL = 1e-6          # relative, not absolute: demands span many decades
 
 
 def run_single_hour(cfg, users, base_stations, leos, region):
@@ -50,7 +56,7 @@ def parse_bs_id(raw):
 
 
 def user_result_fields(u):
-    """Per-user realised outcome after a simulated hour.S
+    """Per-user realised outcome after a simulated hour.
     Returns (bs_id:int|None, spec_eff, served_mbps, demand_mbps, dropped:bool).
     """
     bsid = parse_bs_id(getattr(u, "tn_eval_bs", None))
@@ -58,5 +64,6 @@ def user_result_fields(u):
     served = float(getattr(u, "served_mbps", 0.0) or 0.0)
     demand = float(getattr(u, "current_demand", 0.0) or 0.0)
     reason = str(getattr(u, "tn_reason", "") or "")
-    dropped = (served + 1e-9) < demand or reason.lower().startswith("drop")
+    dropped = (served < demand * (1.0 - _REL_TOL) - 1e-12) \
+        or reason.lower().startswith("drop")
     return bsid, se, served, demand, dropped

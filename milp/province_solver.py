@@ -4,18 +4,28 @@ province_solver.py — multi-hex decomposition driver.
 
 PASS 1  every dense hex solved independently (parallel across cores):
         hex + halo users, own candidates only -> placement + per-sector usage.
-PASS 2  Jacobi sweep: each hex re-solved with neighbors' PASS-1 border towers
+PASS 2  Jacobi sweep: each hex re-solved with neighbours' PASS-1 border towers
         visible as FIXED-OPEN, ZERO-COST candidates carrying their RESIDUAL
         per-sector capacity -> border overbuild pruned, edge users spill onto
-        neighbors' spare spectrum. (One sweep suffices: coupling band is
+        neighbours' spare spectrum. (One sweep suffices: coupling band is
         ~R_max wide vs a 16 km hex.)
-STITCH  owned opened sites from the final pass -> province placement CSV
-        (feed to the simulator for full-physics validation).
+STITCH  owned opened sites from the final pass -> province placement CSV.
+
+THREE HARD BUGS FIXED IN THIS REVISION
+--------------------------------------
+1. `--max-outage-mbps` was declared TWICE in argparse. Python raises
+   argparse.ArgumentError at startup -- this script could not run at all.
+2. The sparse-hex accounting referenced `final` before it was assigned
+   (NameError), and was PRESENT TWICE with slightly different logic, so the
+   totals double-counted sparse demand whichever branch survived.
+3. The owned-demand accounting block in _solve_one was duplicated verbatim;
+   the second copy silently overwrote the first. Harmless but confusing.
 
 Usage (cluster):
     export PYTHONPATH=/Utilisateurs/dbenguer/ntn_tn_optim/src
-    python province_solver.py --users .../users.pkl --config .../5g_base.yaml \\
-        --workers 32 --min-users 500 [--max-hexes 20]   # start small!
+    python province_solver.py --users .../users.pkl \\
+        --config-dir /Utilisateurs/dbenguer/ntn_tn_optim/configs \\
+        --config-name base --workers 32 --min-users 500 --max-hexes 5
 On the first run use --max-hexes 5 to validate the loop before the full set.
 """
 from __future__ import annotations
@@ -27,14 +37,15 @@ import numpy as np
 import h3
 
 from candidate_generator import build_instance, unproject
-from hex_milp import solve_hex, sector_usage_mhz
+from hex_milp import (solve_hex, solve_hex_min_outage, sector_usage_mhz,
+                      diagnose_outage, LAM_DEFAULT, C_BEAM_DEFAULT)
 
 # globals for fork-shared arrays (same CoW pattern as the simulator fix)
 _LAT = _LON = _DEM = None
 _HEX_IDX = None            # hex_id -> np.array of user indices (built ONCE)
 _TIERS = _SE_FN = _SCEN = None
 _ARGS = None
-_ORACLE_KIND = None      # "real" | "proxy" | None (decided once per worker)
+_ORACLE_KIND = None        # "real" | "proxy" | None (decided once per worker)
 
 
 def _get_oracle(inst):
@@ -98,25 +109,20 @@ def _solve_one(task):
                           tiers=_TIERS, se_fn=_SE_FN,
                           ext_sites=ext, beam_residual=beam_res,
                           rho_cand=_ARGS.rho_cand, rho_dep=_ARGS.rho_dep,
-                          agg_res=_ARGS.agg_res, K_elig=_ARGS.k_elig,
+                          agg_res=_ARGS.agg_res, agg_safety=_ARGS.agg_safety,
+                          K_elig=_ARGS.k_elig,
                           beam_bw_hz=_ARGS.beam_bw, beam_se=_ARGS.beam_se)
-    import inspect as _insp
-    _sig = _insp.signature(solve_hex).parameters
-    use_min_out = getattr(_ARGS, "min_outage", False)
+
+    use_min_out = bool(getattr(_ARGS, "min_outage", False))
     if use_min_out:
-        from hex_milp import solve_hex_min_outage
         solver_fn, skw = solve_hex_min_outage, {}
     else:
         solver_fn = solve_hex
         skw = {}
-        if getattr(_ARGS, "max_outage_mbps", None) is not None \
-                and "outage_budget_mbps" in _sig:
+        if getattr(_ARGS, "max_outage_mbps", None) is not None:
             skw["outage_budget_mbps"] = float(_ARGS.max_outage_mbps)
-        if "max_outage_frac" in _sig:          # newer hex_milp.py only
-            skw["max_outage_frac"] = (0.0 if _ARGS.zero_outage else None)
-        elif _ARGS.zero_outage:
-            raise SystemExit("--zero-outage needs the current hex_milp.py "
-                             "(deploy the latest file)")
+        if _ARGS.zero_outage:
+            skw["max_outage_frac"] = 0.0
 
     if getattr(_ARGS, "iterate", 1) > 1:
         # FULL LOOP: solve -> physics oracle -> correct eta -> re-solve
@@ -131,12 +137,28 @@ def _solve_one(task):
         res = solver_fn(inst, lam=_ARGS.lam, c_beam=_ARGS.c_beam,
                         mip_gap=_ARGS.gap, time_limit_s=_ARGS.time_limit,
                         threads=1, log=False, **skw)
+
+    if res.get("no_solution"):
+        return hex_id, {"opened": [], "summary": {
+            "status": res["status"], "gap": float("nan"), "objective": float("nan"),
+            "served_pct": 0.0, "beams": 0, "served_tn_mbps": 0.0,
+            "ntn_mbps": 0.0, "outage_mbps": res["outage_mbps"],
+            "wall_s": 0.0, "opened_n": 0,
+            "own_demand_mbps": float(inst.dem_mbps.sum()), "own_tn_mbps": 0.0,
+            "own_ntn_mbps": 0.0, "own_out_mbps": float(inst.dem_mbps.sum()),
+            "own_served_pct": 0.0, "n_own_dem_pts": 0, "own_beam": 0,
+            "halo_ntn_mbps": 0.0,
+            "why": {"no_eligible": 0.0, "elig_all_open_full": 0.0,
+                    "elig_not_opened": 0.0, "n_pts": 0},
+            "n_cand": int(len(inst.cand_tier)), "n_dem": int(len(inst.dem_mbps)),
+            "tiers": {}}, "ntn_by_hex": {}}
+
     usage = sector_usage_mhz(inst, res)
     y = res["y"]
     opened = []
     for j in np.where(y)[0]:
         if inst.fixed_open[j]:
-            continue                        # neighbor's site, not ours
+            continue                        # neighbour's site, not ours
         if inst.cand_owner_hex[j] != hex_id:
             continue                        # halo candidate owned elsewhere
         la, lo = unproject(inst.cand_xy[j, 0:1], inst.cand_xy[j, 1:2],
@@ -159,28 +181,11 @@ def _solve_one(task):
     # users are solved again (and served) in their own hex's model. Summing a
     # model's totals counts border users up to 7x, and reports halo users as
     # "unserved" here whenever the neighbour's beam residual is exhausted --
-    # even though their owner hex serves them.
+    # even though their owner hex serves them. (Written ONCE; the old file
+    # had this block twice.)
     own_u = [u for u in range(len(inst.dem_mbps)) if inst.dem_hex[u] == hex_id]
     own_set = set(own_u)
     own_d = float(sum(inst.dem_mbps[u] for u in own_u))
-    own_tn = 0.0
-    for (u, j), col in res["x_index"].items():
-        if u in own_set:
-            own_tn += float(res["x_val"][col]) * float(inst.dem_mbps[u])
-    own_out = float(sum(res["o"][u] * inst.dem_mbps[u] for u in own_u))
-    summary.update({"own_demand_mbps": own_d, "own_tn_mbps": own_tn,
-                    "own_out_mbps": own_out, "n_own_dem_pts": len(own_u)})
-
-    # ---- OWNED-DEMAND accounting (the only figures that may be summed) ----
-    # Each hex model also contains HALO users from ring-1 neighbours; those
-    # users are solved again (and served) in their own hex's model. Summing
-    # a model's totals would therefore count border users up to 7 times, and
-    # would report halo users as "unserved" here whenever the neighbour's beam
-    # residual is exhausted -- even though their owner hex serves them.
-    # We therefore report, and stitch, ONLY demand points owned by this hex.
-    own_u = [u for u in range(len(inst.dem_mbps)) if inst.dem_hex[u] == hex_id]
-    own_d = float(sum(inst.dem_mbps[u] for u in own_u))
-    own_set = set(own_u)
     own_tn = 0.0
     for (u, j), col in res["x_index"].items():
         if u in own_set:
@@ -190,24 +195,23 @@ def _solve_one(task):
     summary.update({
         "own_demand_mbps": own_d,
         "own_tn_mbps": own_tn,
+        "own_ntn_mbps": own_ntn,
         "own_out_mbps": own_out,
         "own_served_pct": 100.0 * (own_tn + own_ntn) / max(own_d, 1e-9),
         "n_own_dem_pts": len(own_u),
+        # OWNED beam accounting: this solve owns ONLY its centre hex's beam.
+        # Halo users' offload onto neighbours' beams is reported separately
+        # and never summed at stitch time.
+        "own_beam": 1 if own_ntn > 1e-9 else 0,
+        "halo_ntn_mbps": float(sum(v for k, v in res["ntn_by_hex"].items()
+                                   if k != hex_id)),
     })
-    # OWNED beam accounting: this solve owns ONLY its centre hex's beam.
-    # Halo users' offload onto neighbours' beams is reported separately and
-    # never summed at stitch time (that beam belongs to the neighbour's solve).
-    summary["own_ntn_mbps"] = own_ntn
-    summary["own_beam"] = 1 if own_ntn > 1e-9 else 0
-    summary["halo_ntn_mbps"] = float(
-        sum(v for k, v in res["ntn_by_hex"].items() if k != hex_id))
-    from hex_milp import diagnose_outage
     summary["why"] = diagnose_outage(inst, res)
     if "history" in res:
         h0, hN = res["history"][0], res["history"][-1]
         summary["iters"] = len(res["history"])
-        summary["se_drift"] = hN["mean_se"] - h0["mean_se"]
-        summary["served_drift"] = hN["served_pct"] - h0["served_pct"]
+        summary["se_drift"] = hN.get("mean_se", 0.0) - h0.get("mean_se", 0.0)
+        summary["served_drift"] = hN.get("served_pct", 0.0) - h0.get("served_pct", 0.0)
         summary["oracle"] = _ORACLE_KIND
     if "min_outage_mbps" in res:
         summary["min_outage_mbps"] = res["min_outage_mbps"]
@@ -223,7 +227,11 @@ def main():
     global _LAT, _LON, _DEM, _HEX_IDX, _TIERS, _SE_FN, _SCEN, _ARGS
     ap = argparse.ArgumentParser()
     ap.add_argument("--users", default="/Utilisateurs/dbenguer/ntn_tn_optim/data/users.pkl")
-    ap.add_argument("--config", default="/Utilisateurs/dbenguer/ntn_tn_optim/configs/5g_base.yaml")
+    # Hydra composition: the root config is a defaults: list, so OmegaConf.load
+    # on it would NOT resolve the groups. Compose it properly.
+    ap.add_argument("--config-dir",
+                    default="/Utilisateurs/dbenguer/ntn_tn_optim/configs")
+    ap.add_argument("--config-name", default="base")
     ap.add_argument("--workers", type=int, default=16)
     ap.add_argument("--min-users", type=int, default=500)
     ap.add_argument("--max-hexes", type=int, default=0, help="0 = all")
@@ -231,28 +239,27 @@ def main():
     ap.add_argument("--halo-km", type=float, default=2.847)
     ap.add_argument("--rho-cand", type=float, default=1.0)
     ap.add_argument("--rho-dep", type=float, default=0.95)
-    ap.add_argument("--agg-res", type=int, default=9)
+    ap.add_argument("--agg-res", type=int, default=10)
+    ap.add_argument("--agg-safety", type=float, default=1.0)
     ap.add_argument("--k-elig", type=int, default=6)
     ap.add_argument("--dens-uma", type=float, default=1600.0)
     ap.add_argument("--dens-umi", type=float, default=4000.0)
     ap.add_argument("--dens-mmw", type=float, default=15000.0)
-    ap.add_argument("--lam", type=float, default=1309.0)
-    ap.add_argument("--c-beam", type=float, default=49813.0)
+    ap.add_argument("--lam", type=float, default=LAM_DEFAULT)
+    ap.add_argument("--c-beam", type=float, default=C_BEAM_DEFAULT)
     ap.add_argument("--gap", type=float, default=0.02)
     ap.add_argument("--time-limit", type=float, default=300.0)
     ap.add_argument("--beam-bw", type=float, default=300e6)
     ap.add_argument("--beam-se", type=float, default=1.77)
+    # DECLARED ONCE. The old file declared this twice -> argparse.ArgumentError
+    # on import, i.e. the script could not start.
     ap.add_argument("--max-outage-mbps", type=float, default=None,
                     help="HARD cap on total outage per hex [Mbps] "
                          "(eps-constraint, Eq. 8b). e.g. 10 for near-zero. "
                          "Infeasible => that hex cannot meet the target.")
-    ap.add_argument("--max-outage-mbps", type=float, default=None,
-                    help="HARD cap on total outage per hex [Mbps] "
-                         "(eps-constraint, Eq. 8b). e.g. 10 for near-zero; "
-                         "Infeasible => that hex cannot meet the target.")
     ap.add_argument("--iterate", type=int, default=1,
                     help="physics-corrected iterations per hex (1 = single "
-                         "shot; 3-5 recommended for the full loop)")
+                         "shot; 3-5 for the full loop)")
     ap.add_argument("--damping", type=float, default=0.5)
     ap.add_argument("--stab-tol", type=float, default=0.02)
     ap.add_argument("--min-outage", action="store_true",
@@ -263,12 +270,13 @@ def main():
     ap.add_argument("--out", default="province_placement.csv")
     _ARGS = ap.parse_args()
 
-    # tiers + real SE. load_tiers/make_real_se_fn now take the SCENARIOS
-    # config object (same as smoke_real_sim.py), not a path.
-    from omegaconf import OmegaConf
+    # ---- config: compose the Hydra defaults: list (NOT OmegaConf.load) ----
+    from hydra import compose, initialize_config_dir
+    with initialize_config_dir(config_dir=_ARGS.config_dir, version_base=None):
+        _cfg = compose(config_name=_ARGS.config_name)
+    _scen = _cfg.terrestrial.scenarios
+
     from run_real_tile import load_tiers, make_real_se_fn
-    _cfg = OmegaConf.load(_ARGS.config)
-    _scen = _cfg.terrestrial.scenarios if "terrestrial" in _cfg else _cfg.scenarios
     _TIERS = load_tiers(_scen, _ARGS.dens_uma, _ARGS.dens_umi, _ARGS.dens_mmw)
     _SE_FN = make_real_se_fn(_scen, rho_dep=_ARGS.rho_dep)
     _SCEN = _scen
@@ -334,12 +342,15 @@ def main():
                       f"all_open_full={w['elig_all_open_full']/1e3:.1f} "
                       f"not_opened={w['elig_not_opened']/1e3:.1f}", flush=True)
 
+    if not results:
+        raise SystemExit("PASS 1 produced no solved hexes -- lower --min-users")
+
     # ---------------- PASS 2 (Jacobi border sweep) ----------------
     print("\n=== PASS 2 (residual-capacity border sweep) ===", flush=True)
     edge = h3.average_hexagon_edge_length(5, unit="km")
 
     def border_ext(hex_id):
-        """neighbors' PASS-1 opened sites within halo of this hex."""
+        """neighbours' PASS-1 opened sites within halo of this hex."""
         clat, clon = h3.cell_to_latlng(hex_id)
         ext = []
         for nb in h3.grid_disk(hex_id, 1):
@@ -355,6 +366,7 @@ def main():
     # pass-1 solve already offloaded onto its beam. Prevents the same physical
     # beam being spent twice (once by its owner, once by a halo neighbour).
     cap_full = _ARGS.beam_bw * _ARGS.beam_se / 1e6
+
     def beam_res_for(hex_id):
         res_map = {}
         for nb in h3.grid_disk(hex_id, 1):
@@ -363,6 +375,7 @@ def main():
             used = results[nb]["summary"]["own_ntn_mbps"] if nb in results else 0.0
             res_map[nb] = max(cap_full - used, 0.0)
         return res_map
+
     tasks = [(hx, border_ext(hx), beam_res_for(hx)) for hx in results]
     results2 = {}
     with ProcessPoolExecutor(max_workers=_ARGS.workers) as ex:
@@ -378,40 +391,19 @@ def main():
                   f"({s['own_ntn_mbps']:.0f} Mbps)  {s['wall_s']:.0f}s",
                   flush=True)
 
-    # ---------------- SPARSE-HEX ACCOUNTING (full-Ontario totals) ----------
-    # Hexes under --min-users get no TN build; their users go to their hex
-    # beam: served = min(demand, C_beam), remainder = outage. Included so the
-    # stitched totals cover ALL of Ontario, comparable with the simulator.
-    cap_full = _ARGS.beam_bw * _ARGS.beam_se / 1e6
-    sparse = {hx: n for hx, n in counts.items()
-              if hx not in final and n > 0}
-    sp_dem = sp_ntn = sp_out = 0.0
-    sp_beams = 0
-    for hx in sparse:
-        idx = _HEX_IDX[hx]
-        d = float(_DEM[idx].sum())
-        if d <= 0:
-            continue
-        served = min(d, cap_full)
-        sp_dem += d
-        sp_ntn += served
-        sp_out += d - served
-        sp_beams += 1
-    if sparse:
-        print(f"\n  sparse hexes (<{_ARGS.min_users} users, NTN-only): "
-              f"{len(sparse):,} hexes, demand {sp_dem/1e3:,.1f} Gbps -> "
-              f"NTN {sp_ntn/1e3:,.1f}, outage {sp_out/1e3:,.1f} Gbps, "
-              f"{sp_beams:,} beams", flush=True)
+    # ---------------- final pass selection (MUST precede accounting) -------
+    final = results2 or results
 
-    # ------------- SPARSE-HEX ACCOUNTING (full-region totals) ------------
+    # ------------- SPARSE-HEX ACCOUNTING (full-region totals) --------------
     # Hexes under --min-users get no TN build, but their demand is real and
-    # the simulator will serve it via NTN. Account them so the stitched
-    # totals cover EVERY user exactly once (comparable with the simulator).
-    cap_full = _ARGS.beam_bw * _ARGS.beam_se / 1e6
+    # the simulator will serve what it can via NTN. Account them so the
+    # stitched totals cover EVERY user exactly once (comparable with the
+    # simulator). Written ONCE -- the old file had two copies of this block,
+    # the first of which referenced `final` before assignment (NameError).
     sp_dem = sp_ntn = sp_out = 0.0
     sp_beams = 0
     for hx in counts:
-        if hx in (results2 or results):
+        if hx in final:
             continue
         d = float(_DEM[_HEX_IDX[hx]].sum())
         if d <= 0:
@@ -427,7 +419,6 @@ def main():
               flush=True)
 
     # ---------------- STITCH ----------------
-    final = results2 or results
     n_sites = 0
     with open(_ARGS.out, "w", newline="") as f:
         w = csv.writer(f)

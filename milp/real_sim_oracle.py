@@ -2,33 +2,25 @@
 """
 real_sim_oracle.py — THE SIMULATOR INSIDE THE LOOP.
 
-Replaces the analytic planning oracle: after each MILP solve, the ACTUAL
-3GPP system-level simulator is run on this hex's users and the MILP's towers
-for ONE busy hour, and its measured outcome is fed back as corrections to the
-optimisation model. Validation is no longer a separate downstream step -- the
-thing that judges is the thing that corrects.
+After each MILP solve the ACTUAL 3GPP system-level simulator is run on this
+hex's users and the MILP's towers for ONE busy hour, and its measured outcome
+is fed back as corrections to the optimisation model. Validation is no longer
+a separate downstream step -- the thing that judges is the thing that corrects.
 
-WHAT THE SIMULATOR CORRECTS (two distinct feedbacks):
-
- (1) eta_{u,j}  -- realised spectral efficiency per (demand point, site).
-     Measured from the users that actually attached to j, WITH shadowing
-     draws, sector patterns and the true opened-interferer geometry.
+TWO DISTINCT FEEDBACKS:
+ (1) eta_{u,j}  realised spectral efficiency per (demand point, site), with
+     shadowing draws, sector patterns and the true opened-interferer geometry.
      Corrects the frozen-SE assumption (Prop. 3).
+ (2) rho_j      per-site realised capacity efficiency
+                = delivered / ATTACHED demand, in [0,1].
+     Fed back as a derating of the per-sector bandwidth budget.
+     (attached/ASSIGNED is reported as `divergence` but NOT fed back:
+      re-routing is not a capacity fault of site j.)
 
- (2) rho_j      -- per-site REALISED CAPACITY EFFICIENCY:
-            rho_j = (demand the simulator actually served through j)
-                  / (demand the MILP assigned to j)
-     One number per site, in [0,1]. It absorbs everything the MILP's
-     idealised association cannot represent: greedy per-user attachment
-     instead of genie fractional assignment, admission control, PF
-     scheduling, mobility, and cell-edge losses. Fed back as a derating of
-     the per-sector bandwidth budget:
-            sum_u (d_u/eta_uj) x_uj  <=  W_t * rho_j * y_j
-     so the next solve builds against capacity the SIMULATOR agrees exists.
-
-The loop therefore converges to a deployment whose planned service the full
-simulator reproduces -- there is no residual "planning vs reality" gap to
-report afterwards, because the gap is what the loop is minimising.
+FIX IN THIS REVISION: the early-return for an empty placement returned a
+2-tuple while every caller unpacks 3 (realised, rho, drop_by_dem). That
+crashed exactly when y came back all-closed -- i.e. in the one situation you
+most needed a readable error. It now returns a consistent 3-tuple.
 
 COST: one single-hour simulation per iteration per hex. The single-hour hook
 is cfg.simulation.duration_s = 72000 with time_step_s = 3600, which makes
@@ -60,7 +52,7 @@ def build_base_stations(inst, y, scen_cfg, h3_resolution: int = 5):
     from candidate_generator import unproject
 
     bss, bs_id = [], 0
-    open_idx = np.where(y)[0]
+    open_idx = np.where(np.asarray(y, dtype=bool))[0]
     for site_id, j in enumerate(open_idx):
         tier = inst.tiers[inst.cand_tier[j]].name
         sc = scen_cfg[tier]
@@ -99,36 +91,32 @@ def build_base_stations(inst, y, scen_cfg, h3_resolution: int = 5):
 
 # ----------------------------------------------------------------------
 def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
-                                scen_cfg, agg_res: int = 9,
+                                scen_cfg, agg_res: int | None = None,
                                 workers: int = 1,
                                 se_percentile: float = 20.0,
-                                calibrate: bool = True,   # SEE NOTE BELOW
+                                calibrate: bool = True,
                                 skip_first_sim: bool = False,
                                 log: bool = False):
-    """se_percentile: which quantile of the REALISED per-user SE distribution
-    the MILP should plan against. The mean/median plans for the typical user,
-    so ~half the users in a demand point are worse than assumed and drop under
-    shadowing. Planning at p20 builds the margin that drives realised drops
-    toward zero -- it is a deterministic surrogate for a chance constraint
-    P(user served) >= 1 - eps. Raise the percentile for cheaper networks,
-    lower it for fewer drops.
+    """Return oracle(y, x_assign) -> (elig_se_realised, rho_per_cand, drop_by_dem).
 
-    skip_first_sim: reuse a simulation already run by the caller (the smoke
-    test runs one in [C]); avoids paying 24 min twice."""
-    """Return an oracle(y, x_assign) -> (elig_se_realised, rho_per_cand).
-
-    hex_users : the User objects of this hex+halo (same ones the MILP's
+    hex_users : the User objects of this hex+halo (the same ones the MILP's
                 demand points were aggregated from).
-    leos, region : passed straight through to the simulator (built once by
-                the driver exactly as scenario.py does).
+    leos, region : passed straight through to the simulator (built once by the
+                driver exactly as scenario.py does).
+    se_percentile : which quantile of the REALISED per-user SE distribution the
+                MILP should plan against. The mean/median plans for the typical
+                user, so ~half the users in a demand point are worse than
+                assumed and drop under shadowing. Planning at p20 is a
+                deterministic surrogate for a chance constraint
+                P(user served) >= 1 - eps.
+    skip_first_sim : reuse a simulation already run by the caller (the smoke
+                test runs one in [C]); avoids paying the sim cost twice.
     """
-    from omegaconf import OmegaConf
-    from full_pipeline_hooks import run_single_hour   # thin wrapper, below
+    from full_pipeline_hooks import run_single_hour   # thin wrapper
 
-    # Map every user to its demand point ONCE, by nearest demand-point
-    # centroid in the instance's own projected frame. Robust: does not depend
-    # on the Instance storing res-9 keys, and it is exactly the aggregation
-    # the MILP used (demand points ARE the res-9 centroids).
+    # Map every user to its demand point ONCE, by nearest demand-point centroid
+    # in the instance's own projected frame -- exactly the aggregation the MILP
+    # used (demand points ARE the res-agg_res centroids).
     from scipy.spatial import cKDTree
     from candidate_generator import project_km
     _ux, _uy = project_km(
@@ -143,18 +131,23 @@ def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
     _, u_dem = _tree.query(np.column_stack([_ux, _uy]))   # user -> demand pt
 
     _first_call = True
-    # Pristine NOMINAL spectral efficiencies. Ratios must always be taken
+    # Pristine NOMINAL spectral efficiencies. Ratios must ALWAYS be taken
     # against these, never against an already-corrected value, or the
     # correction compounds across iterations.
     _se_nominal = [list(r) for r in inst.elig_se]
 
     def oracle(y, x_assign: Dict[Tuple[int, int], float] | None = None):
+        nonlocal _first_call
         bss, bsid_to_cand = build_base_stations(inst, y, scen_cfg)
         if not bss:
-            return [list(se) for se in inst.elig_se], {}
+            # 3-tuple, matching every caller. (Previously a 2-tuple -> crash.)
+            if log:
+                print("      [sim] placement is EMPTY -- no towers to simulate;"
+                      " returning nominal SE, no rho, no drops", flush=True)
+            _first_call = False
+            return [list(se) for se in _se_nominal], {}, {}
 
         # ---- RUN THE REAL SIMULATOR FOR ONE BUSY HOUR --------------------
-        nonlocal _first_call
         users_copy = hex_users        # simulator mutates user state in place
         if _first_call and skip_first_sim:
             if log:
@@ -174,7 +167,6 @@ def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
         _first_call = False
 
         # ---- HARVEST per-user realised state ----------------------------
-        # served_by[(dem_pt, cand)] -> [se samples]; served/assigned per site
         from full_pipeline_hooks import user_result_fields
         se_samples: Dict[Tuple[int, int], List[float]] = {}
         served_by_cand: Dict[int, float] = {}
@@ -204,22 +196,16 @@ def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
                   f"{n_dropped:,} users short by {dropped_mbps/1e3:.1f} Gbps",
                   flush=True)
 
-        # ---- FEEDBACK 1: realised eta per (demand point, candidate) -----
         # ---- FEEDBACK 1: realised eta ------------------------------------
-        # NAIVE VERSION (what this used to do): correct ONLY the pairs the
-        # simulator exercised, leave the rest at their nominal value. On the
-        # real hex only ~12% of eligible pairs are ever exercised, so the
-        # model ends up believing the sites it TESTED are bad and the sites it
-        # NEVER TESTED are good -- it then rebuilds on untested candidates,
-        # which underperform in turn. Measured effect: the "corrected" solve
-        # was consistently ~15 Gbps WORSE than the uncorrected one
-        # (25.2->43.2 and 28.2->42.8 Gbps on hex 852b9bd7).
-        #
-        # CALIBRATED VERSION (calibrate=True): fit a correction factor
-        #     kappa_t(d) = realised_SE / nominal_SE
-        # per tier and distance bin from every sample, then apply it to ALL
-        # eligible pairs. Exercised and unexercised pairs are treated
-        # identically, so the selection bias disappears.
+        # NAIVE VERSION: correct ONLY the pairs the simulator exercised. On the
+        # real hex only ~12% of eligible pairs are ever exercised, so the model
+        # believes the sites it TESTED are bad and the sites it NEVER TESTED
+        # are good -- it then rebuilds on untested candidates, which
+        # underperform in turn (measured: 25.2 -> 43.2 Gbps worse).
+        # CALIBRATED VERSION: fit kappa_t(d) = realised/nominal per tier and
+        # distance bin from every sample, then apply it to ALL eligible pairs.
+        # Exercised and unexercised pairs are treated identically -> no
+        # selection bias.
         realised = []
         spread = []
         ratios: Dict[Tuple[int, int], List[float]] = {}   # (tier, dbin)->ratios
@@ -264,7 +250,7 @@ def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
 
         if log and kappa_tier:
             names = {i: t.name for i, t in enumerate(inst.tiers)}
-            txt = "  ".join(f"{names.get(t,t)}={k:.2f}"
+            txt = "  ".join(f"{names.get(t, t)}={k:.2f}"
                             for t, k in sorted(kappa_tier.items()))
             n_cal = sum(len(v) for v in ratios.values())
             print(f"      [cal] kappa = realised/nominal SE from {n_cal:,} "
@@ -272,19 +258,23 @@ def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
             print(f"      [cal] applied to ALL {sum(len(r) for r in realised):,}"
                   f" eligible pairs ({len(kappa)} tier x distance bins fitted)"
                   f" -- no selection bias", flush=True)
+            # A tier that appears in one iteration and vanishes the next makes
+            # the calibration itself non-stationary; say so rather than letting
+            # it silently swing the next solve.
+            if len(kappa_tier) < len({int(t) for t in inst.cand_tier}):
+                missing = sorted({names.get(int(t), int(t))
+                                  for t in set(inst.cand_tier)}
+                                 - {names.get(t, t) for t in kappa_tier})
+                print(f"      [cal] WARNING no samples for tier(s) {missing} "
+                      f"this iteration -> they keep NOMINAL SE while others are"
+                      f" deflated. Cross-iteration comparisons of the resulting"
+                      f" placement are not like-for-like.", flush=True)
         if log and spread:
             print(f"      [sim] planning at p{se_percentile:.0f} of realised SE; "
                   f"within-demand-point SE spread (p80-p20) median "
                   f"{np.median(spread):.2f} bps/Hz", flush=True)
 
-        # ---- FEEDBACK 2: rho_j = simulator-served / MILP-assigned -------
-        # rho_j must measure DELIVERY EFFICIENCY, not association divergence.
-        #   delivered / ATTACHED  -> what the site could actually push to the
-        #                            users that really showed up (the derating
-        #                            the MILP needs)
-        #   attached / ASSIGNED   -> how far greedy attachment strayed from the
-        #                            plan (reported, NOT fed back: re-routing is
-        #                            not a capacity fault of site j)
+        # ---- FEEDBACK 2: rho_j = delivered / ATTACHED --------------------
         rho: Dict[int, float] = {}
         divergence: Dict[int, float] = {}
         if x_assign:
@@ -296,7 +286,8 @@ def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
             for j in set(list(assigned) + list(attached_by_cand)):
                 att = attached_by_cand.get(j, 0.0)
                 if att > 1e-6:
-                    rho[j] = min(1.0, max(0.05, served_by_cand.get(j, 0.0) / att))
+                    rho[j] = min(1.0, max(0.05,
+                                          served_by_cand.get(j, 0.0) / att))
                 a = assigned.get(j, 0.0)
                 if a > 1e-6:
                     divergence[j] = att / a
@@ -306,16 +297,17 @@ def make_real_simulation_oracle(inst, cfg, hex_users, leos, region,
                   f"mean={dv.mean():.2f} p10={np.percentile(dv,10):.2f} "
                   f"p90={np.percentile(dv,90):.2f}  (reported, not fed back)",
                   flush=True)
-        if log:
-            if rho:
-                v = np.array(list(rho.values()))
-                print(f"      [sim] rho: mean={v.mean():.3f} "
-                      f"p10={np.percentile(v,10):.3f} min={v.min():.3f} "
-                      f"over {len(rho)} sites", flush=True)
+        if log and rho:
+            v = np.array(list(rho.values()))
+            print(f"      [sim] rho: mean={v.mean():.3f} "
+                  f"p10={np.percentile(v,10):.3f} min={v.min():.3f} "
+                  f"over {len(rho)} sites", flush=True)
         oracle.last_divergence = divergence
         oracle.last_drop_by_dem = drop_by_dem
         return realised, rho, drop_by_dem
 
+    oracle.last_divergence = {}
+    oracle.last_drop_by_dem = {}
     return oracle
 
 
@@ -324,17 +316,12 @@ def coordination_gap(hex_users, bss, log: bool = True):
     """UPPER BOUND on what perfect association steering could recover, using
     ONLY data the simulator already produced. No patch to full_pipeline.
 
-    Measured on hex 852b9bd7: the deployed network carries ~2.5x the capacity
-    of the demand, mean cell utilisation is 37%, yet 5.4% of demand drops.
-    That is only possible if dropped users sit within reach of cells that have
-    spare spectrum but were not chosen by greedy max-SINR attachment.
-
     Method:
-      used_hz[j]  = sum of tn_eval_hz over users the simulator attached to j
+      used_hz[j]  = sum over users attached to j of (delivered Mbps / SE)
       spare_hz[j] = total_bandwidth_hz - used_hz[j]     (per sector cell)
-      for each short user, in descending shortfall:
-          find cells whose coverage radius contains the user
-          fill from the one with the most spare, at the user's measured SE
+      for each short user, in descending shortfall: find cells whose coverage
+      radius contains the user, fill from the one with the most spare, at the
+      user's measured SE.
     The result is an UPPER bound: a user steered to a different cell would see
     lower SINR than the one it actually measured, so real recovery is smaller.
     If even this bound is small, the shortfall is genuine capacity. If it is
@@ -351,21 +338,21 @@ def coordination_gap(hex_users, bss, log: bool = True):
         if bsid is not None and bsid in cells and se > 0:
             # Hz ACTUALLY consumed = delivered Mbps / spectral efficiency.
             # (Do NOT use tn_eval_hz: that is the bandwidth the scheduler
-            # evaluated/offered for the link, ~10,000x larger than what the
-            # user consumed. Summing it made every cell look 100% full and
-            # produced a spurious 0% coordination gap.)
+            # evaluated/offered for the link, orders of magnitude larger than
+            # what the user consumed. Summing it made every cell look 100%
+            # full and produced a spurious 0% coordination gap.)
             used[bsid] = used.get(bsid, 0.0) + got * 1e6 / se
     spare = {j: max(float(b.total_bandwidth_hz) - used.get(j, 0.0), 0.0)
              for j, b in cells.items()}
-    # SANITY CHECK: our reconstructed utilisation must match the simulator's
-    # own reported mean cell utilisation. If it does not, the Hz accounting
-    # is wrong and the gap number is meaningless.
+
+    # SANITY CHECK: reconstructed utilisation must match the simulator's own
+    # reported mean cell utilisation. If it does not, the Hz accounting is
+    # wrong and the gap number is meaningless.
     utils = [used.get(j, 0.0) / max(float(b.total_bandwidth_hz), 1.0)
              for j, b in cells.items()]
     if log and utils:
-        import numpy as _np
         print(f"      [coord] reconstructed mean cell utilisation "
-              f"{100*_np.mean(utils):.1f}% (compare with the simulator's own "
+              f"{100*np.mean(utils):.1f}% (compare with the simulator's own "
               f"[util] line -- they MUST agree, else the Hz accounting is off)",
               flush=True)
 
@@ -415,7 +402,6 @@ def coordination_gap(hex_users, bss, log: bool = True):
 
 
 def _in_range(bs, lat, lon):
-    import math
     dlat = (lat - bs.lat) * 111.0
     dlon = (lon - bs.lon) * 111.0 * math.cos(math.radians(bs.lat))
     return math.hypot(dlat, dlon) <= float(bs.coverage_radius_km)

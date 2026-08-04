@@ -1,0 +1,10 @@
+- workers=200
+- +solver_threads=64
+- +solve_time_limit=28800
+- +dens_uma=0
+- +dens_umi=0
+- +k_elig=8
+- +agg_res=11
+- +agg_safety=1.0
+- +calibrate=true
+- +outage_budget_mbps=0
