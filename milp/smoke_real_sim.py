@@ -195,6 +195,7 @@ def main(cfg: DictConfig):
     risk_z = float(cfg.get("risk_z", 0.0))
     disagg = bool(cfg.get("disaggregate_linking", True))
     closest_assignment=bool(cfg.get("closest_assignment", False))
+    min_outage = bool(cfg.get("min_outage", False))
     # CROSS-TIER minimum separation in METRES. 75 m default: a macro umbrella
     # with small cells underneath is standard HetNet practice. The legacy rule
     # used the small tier's full design ISD (512 m for UMa-UMi), which exceeds
@@ -244,6 +245,10 @@ def main(cfg: DictConfig):
         users = pickle.load(f)
     print(f"    {len(users):,} users in {time.time()-t0:.0f}s", flush=True)
     print("[.] moving users to hour 20 ...", flush=True)
+    u = users[0]
+    u.move(20.0, 5); a = (u.current_lat, u.current_lon)
+    u.move(20.0, 5); b = (u.current_lat, u.current_lon)
+    print("Movement FIXED" if a == b else "STILL RANDOM", flush =True)
     for u in users:
         u.move(20.0, 5)
 
@@ -344,6 +349,17 @@ def main(cfg: DictConfig):
             outage_budget_mbps=_budget, disaggregate_linking=disagg, log=True)
         if not res.get("no_solution") and res["y"].any():
             sparse_sector_report(inst, res, variance_by_point(inst), z=risk_z)
+    elif min_outage:
+        print("[.] LEXICOGRAPHIC solve: min outage first, then min cost",
+              flush=True)
+        res = solve_hex_min_outage(inst, lam=lam, c_beam=c_beam,
+                                   mip_gap=0.02, time_limit_s=tl,
+                                   threads=solver_threads, log=True,
+                                   disaggregate_linking=disagg)
+        print(f"    CERTIFIED FLOOR D_min = "
+              f"{res['min_outage_mbps']:,.0f} Mbps "
+              f"({100*res['min_outage_mbps']/float(dem.sum()):.2f}% of demand)",
+              flush=True)
     else:
         res = solve_hex(inst, lam=lam, c_beam=c_beam,
                         time_limit_s=tl, threads=solver_threads,
@@ -478,6 +494,19 @@ def main(cfg: DictConfig):
           "(rho_dep / agg_safety / rho_cand -- see the [A2] pre-flight).\n"
           "      '5G Congestion' / 'Tower Empty'    => ASSOCIATION problem "
           "(steering/CIO), NOT solved by more sites.", flush=True)
+    
+    # ---------- D1b. EXPORT + PLOT THE DROPPED USERS ---------------------
+    # Dropped users exist only in memory at this point (run_single_hour has
+    # mutated the User objects). Export before anything else touches them.
+    try:
+        from plot_drops import export_and_plot_drops
+        export_and_plot_drops(
+            hex_users, bss, prefix=f"drops_{hex_id[:8]}",
+            title=f"{hex_id}  res-{agg_res} safety={agg_safety} "
+                  f"rho_dep={rho_dep}  |  {n_sites0:,} sites  |  "
+                  f"{100*sim_drop_mbps/max(sim_demand_mbps,1e-9):.2f}% dropped")
+    except Exception as e:
+        print(f"    (drop export/plot skipped: {e})", flush=True)
 
     # ---------- D2. COORDINATION GAP ---------
     coordination_gap(hex_users, bss, log=True)

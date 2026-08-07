@@ -11,12 +11,12 @@ class User:
     home_lon: float
     user_type: str
     base_demand_mbps: float
-    
+
     diurnal_cfg: Dict[str, Any]
     mobility_cfg: Dict[str, Any]
 
     qos_min_mbps: float = 0.1
-    
+
     current_lat: float = field(init=False)
     current_lon: float = field(init=False)
     current_h3_id: str = field(init=False)
@@ -39,7 +39,7 @@ class User:
         'user_id',
         'user_type',
         'profile_type',
-        
+
         # --- Geography & Mobility ---
         'home_lat',
         'home_lon',
@@ -50,38 +50,38 @@ class User:
         'attractor_probs',
         'diurnal_cfg',
         'mobility_cfg',
-        
+
         # --- Traffic & Demand ---
         'qos_min_mbps',
         'base_demand_mbps',
         'current_demand',
         'served_mbps',
         'historical_avg_mbps',
-        
+
         # --- RF Physics & Scheduling ---
         'spectral_efficiency',
         'achievable_rate_mbps',
         'pf_score',
-        
+
         # --- Network State & Routing ---
         'coverage_type',
         'current_state',
         'locked_to_tn',
-        
+
         # --- Detailed Drop Diagnostics ---
         'tn_cell_id',
         'tn_eval_bs',
         'tn_eval_hz',
-        'tn_sinr_db',          
+        'tn_sinr_db',
         'tn_reason',
         'ntn_eval_beam',
         'ntn_eval_hz',
-        'ntn_sinr_db', 
+        'ntn_sinr_db',
         'ntn_reason',
-        'tn_S_dbm', 
-        'tn_I_dbm', 
-        'tn_N_dbm', 
-        'tn_num_interferers', 
+        'tn_S_dbm',
+        'tn_I_dbm',
+        'tn_N_dbm',
+        'tn_num_interferers',
         'tn_IoverN_db'
     ]
 
@@ -95,7 +95,7 @@ class User:
         self.diurnal_cfg = diurnal_cfg
         self.mobility_cfg = mobility_cfg
         self.qos_min_mbps = qos_min_mbps
-        
+
         # Initialize the other slots to None/0 so they exist in memory
         self.current_lat = home_lat
         self.current_lon = home_lon
@@ -112,7 +112,7 @@ class User:
         self.coverage_type = "IDLE"
         self.current_state = "IDLE"
         self.locked_to_tn = False
-        
+
         # Diagnostics
         self.tn_cell_id = -1
         self.tn_eval_bs = "None"
@@ -128,11 +128,11 @@ class User:
         self.tn_N_dbm = float('nan')
         self.tn_num_interferers = 0
         self.tn_IoverN_db = float('nan')
-    
+
     def __post_init__(self):
         self.current_lat = self.home_lat
         self.current_lon = self.home_lon
-        
+
     def set_resolution(self, resolution: int):
         self.current_h3_id = h3.latlng_to_cell(self.current_lat, self.current_lon, resolution)
 
@@ -144,17 +144,56 @@ class User:
         evening_peak = e_cfg.get('height_multiplier', 1.0) * np.exp(-((hour - e_cfg.get('center_hour', 20.0))**2) / (2 * (e_cfg.get('width_hours', 2.5)**2)))
         return self.base_demand_mbps * (base_traffic + noon_peak + evening_peak)
 
-    def move(self, hour: float, resolution: int):
+    def move(self, hour: float, resolution: int, seed=42):
+        """Relocate this user for `hour`.
+
+        DETERMINISM (seed != None)
+        --------------------------
+        The three random draws below are keyed on (seed, user_id, hour), so
+        move(20.0, 5, seed=42) returns the SAME position no matter how many
+        times it is called, in what ORDER, or over which SUBSET of users.
+
+        Why that matters: the planner and the simulator both call move(20.0).
+        With the unseeded global RNG they get DIFFERENT realisations --
+        `night_hours_start=22`, `night_hours_end=6`, so at hour 20 the
+        condition `(20 < 6) or (20 > 22)` is False and the DAY branch applies
+        with day_move_chance = 0.4. About 40% of users relocate on every call.
+
+        The MILP therefore optimised for one set of positions and the
+        simulator graded a different one. That is the only way the model can
+        report outage = 0 while the simulator loses users to "No 5G Tower in
+        Geographic Range": covered where they were planned, uncovered where
+        they were evaluated.
+
+        Passing seed=None keeps the original stochastic behaviour, so
+        Monte-Carlo mobility studies are still possible on purpose -- just
+        never accidentally.
+        """
         start = self.mobility_cfg.get('night_hours_start', 22)
         end = self.mobility_cfg.get('night_hours_end', 6)
-        
+
         move_chance = self.mobility_cfg.get('night_move_chance', 0.1) if (hour < end or hour > start) else self.mobility_cfg.get('day_move_chance', 0.4)
-        
-        if np.random.rand() < move_chance and len(self.attractors) > 0:
-            chosen_idx = np.random.choice(len(self.attractors), p=self.attractor_probs)
+
+        if seed is None:
+            # legacy path: global RNG, non-reproducible across calls
+            rand_u = np.random.rand()
+            pick = lambda n, p: np.random.choice(n, p=p)
+            gauss = lambda s: np.random.normal(0, s)
+        else:
+            # SeedSequence over (seed, user_id, hour) -> independent, stable
+            # stream per user per hour. hour is scaled to an int so fractional
+            # hours (e.g. 20.5) key distinctly.
+            rng = np.random.default_rng(
+                [int(seed), int(self.user_id), int(round(float(hour) * 100))])
+            rand_u = rng.random()
+            pick = lambda n, p: rng.choice(n, p=p)
+            gauss = lambda s: rng.normal(0, s)
+
+        if rand_u < move_chance and len(self.attractors) > 0:
+            chosen_idx = pick(len(self.attractors), self.attractor_probs)
             target_lat, target_lon = self.attractors[chosen_idx]
-            
+
             wander = self.mobility_cfg.get('gps_wander_std_dev', 0.005)
-            self.current_lat = target_lat + np.random.normal(0, wander)
-            self.current_lon = target_lon + np.random.normal(0, wander)
+            self.current_lat = target_lat + gauss(wander)
+            self.current_lon = target_lon + gauss(wander)
             self.set_resolution(resolution)

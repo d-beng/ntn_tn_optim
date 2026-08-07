@@ -64,7 +64,12 @@ _KD = None
 _LAT0 = 0.0
 _MAX_COV_R_KM = 0.0
 _MAX_INTF_CUTOFF_M = 0.0
-_TOPK = 6          # candidate cells returned per user (capacity-aware attach)
+# [ASSOCIATION] candidate cells returned per user. SINR is computed for EVERY
+# in-range cell anyway, so this only trims the RETURNED list -- raising it is
+# nearly free. It matters more than it used to: PHASE 1 now orders users by
+# how many options they have (minimum-remaining-values), so truncating the
+# candidate list would bias that ordering as well as remove fallbacks.
+_TOPK = 12
 _R_EARTH_KM = 6371.0088
 
 # [SHARED NETWORK SNAPSHOT — fork-inherited, copy-on-write-safe]
@@ -243,6 +248,9 @@ def run_daily_mobility_simulation(
     time_step_s = cfg.simulation.get("time_step_s", 3600)
     time_steps_s = list(range(20 * 3600, duration_s + time_step_s, time_step_s))
     allow_spillover = cfg.simulation.get("allow_spillover", True)
+    # [ASSOCIATION] "mrv" (default) = fewest-options-first, "demand" =
+    # largest-demand-first, "none" = arbitrary (the historical behaviour).
+    assoc_order = str(cfg.simulation.get("association_order", "mrv")).lower()
 
     worker_count = int(cfg.simulation.get("num_workers", _detect_cpus() or 1))
     use_parallel = worker_count > 1
@@ -305,6 +313,7 @@ def run_daily_mobility_simulation(
         "ue_height_m": float(cfg.terrestrial.get("ue_height_m", 1.5)),
     }
     print(f"   [link] explicit params: {link_params}", flush=True)
+    print(f"   [assoc] association_order={assoc_order}  TOPK={_TOPK}", flush=True)
 
     hex_to_candidate_towers: Dict[str, List[BaseStation]] = {}
     for bs in base_stations:
@@ -420,8 +429,37 @@ def run_daily_mobility_simulation(
                 else:
                     results = map(_evaluate_attachment, payload)
 
-                # running reserved bandwidth per BS for capacity-aware attach
-                reserved_hz = {bs.bs_id: 0.0 for bs in base_stations}
+                # ----------------------------------------------------------
+                # ASSOCIATION ORDER MATTERS.
+                #
+                # Attachment is a greedy bin-pack, and greedy bin-packs are
+                # order-dependent. The historical code consumed `results` in
+                # arbitrary user order, which loses served demand for a reason
+                # that has nothing to do with the network:
+                #
+                #   user B sits where cells 1 and 2 overlap;
+                #   user A can only reach cell 1.
+                #   If B is served first and happens to take cell 1, A drops --
+                #   even though B could have used cell 2 and BOTH would have
+                #   been served.
+                #
+                # Largest-demand-first (FFD) does NOT fix this and can make it
+                # worse: a big flexible user is exactly the one that steals a
+                # constrained user's only cell.
+                #
+                # MINIMUM REMAINING VALUES (fewest reachable cells first) is
+                # the standard constraint-satisfaction ordering for precisely
+                # this failure. Constrained users are placed while their single
+                # option is still free; flexible users absorb what is left.
+                # Demand breaks ties (largest first among equally constrained).
+                #
+                # COST: the candidate lists must be MATERIALISED before they
+                # can be ordered, instead of streamed. The `diag` dicts are
+                # dropped first -- keeping them would cost several GB across
+                # millions of users, and PHASE 1 only needs them for the
+                # best-SINR candidate, which is recorded immediately.
+                # ----------------------------------------------------------
+                pending = []
                 for u, cand_list in zip(active_users, results):
                     if not cand_list:
                         u.tn_reason = "No 5G Tower in Geographic Range"
@@ -433,42 +471,75 @@ def run_daily_mobility_simulation(
                     u.tn_num_interferers = b_diag["num_interferers"]
                     u.tn_IoverN_db = b_diag["IoverN_dB"]
 
-                    # CAPACITY-AWARE ATTACH: among candidates above the SINR
-                    # floor, pick the best-SINR cell that still has room for this
-                    # user's demand; fall back to best-SINR cell if all are full
-                    # (so the drop is correctly attributed to congestion, not
-                    # coverage). This spreads load across sectors/towers instead
-                    # of piling everyone onto the single peak-SINR cell.
-                    chosen = None
-                    for (sinr_db, spec_eff, bs_id, diag) in cand_list:
-                        if sinr_db < sinr_min_tn:
-                            continue
-                        bs = bs_by_id[bs_id]
-                        need_hz = (u.current_demand * 1e6) / max(spec_eff, 1e-6)
-                        if reserved_hz[bs_id] + need_hz <= bs.total_bandwidth_hz:
-                            chosen = (sinr_db, spec_eff, bs_id, need_hz)
-                            break
-                    if chosen is None:
-                        # all reachable cells above floor are full -> attach to
-                        # best-SINR one anyway; PHASE 2 will mark it congested.
-                        above = [c for c in cand_list if c[0] >= sinr_min_tn]
-                        if above:
-                            sinr_db, spec_eff, bs_id, _ = above[0]
-                            chosen = (sinr_db, spec_eff, bs_id,
-                                      (u.current_demand * 1e6) / max(spec_eff, 1e-6))
-                    if chosen is None:
-                        # nothing above SINR floor
+                    # keep only (sinr, se, bs_id); drop the diag dicts here
+                    feas = [(c[0], c[1], c[2]) for c in cand_list
+                            if c[0] >= sinr_min_tn]
+                    if not feas:
                         u.tn_sinr_db = b_sinr
                         u.tn_reason = f"5G SINR too low ({b_sinr:.1f} dB)"
                         u.tn_eval_bs = f"BS_{b_id}"
+                        continue
+                    pending.append((len(feas), -u.current_demand, u, feas))
+
+                if assoc_order == "mrv":
+                    pending.sort(key=lambda t: (t[0], t[1]))
+                elif assoc_order == "demand":
+                    pending.sort(key=lambda t: t[1])
+                # "none" -> leave in arbitrary order (historical behaviour)
+
+                # running reserved bandwidth per BS for capacity-aware attach
+                reserved_hz = {bs.bs_id: 0.0 for bs in base_stations}
+                _n_full_fit = 0
+                _n_partial = 0
+                for _nf, _nd, u, feas in pending:
+                    # LOAD-AWARE ATTACH, two rules in order:
+                    #   1. the best-SINR cell with room for the FULL demand;
+                    #   2. otherwise the reachable cell with the MOST SPARE Hz,
+                    #      so PHASE 2 can still grant partial service.
+                    # Rule 2 replaces "attach to the best-SINR cell anyway":
+                    # that cell was full BY CONSTRUCTION, so the drop was
+                    # guaranteed before PHASE 2 ever looked at it.
+                    chosen = None
+                    best_spare = None
+                    for (sinr_db, spec_eff, bs_id) in feas:
+                        bs = bs_by_id[bs_id]
+                        need_hz = (u.current_demand * 1e6) / max(spec_eff, 1e-6)
+                        spare = bs.total_bandwidth_hz - reserved_hz[bs_id]
+                        if spare >= need_hz:
+                            chosen = (sinr_db, spec_eff, bs_id, need_hz)
+                            break
+                        if best_spare is None or spare > best_spare[0]:
+                            best_spare = (spare, sinr_db, spec_eff, bs_id,
+                                          need_hz)
+                    if chosen is not None:
+                        _n_full_fit += 1
+                    elif best_spare is not None:
+                        _sp, sinr_db, spec_eff, bs_id, need_hz = best_spare
+                        chosen = (sinr_db, spec_eff, bs_id, need_hz)
+                        _n_partial += 1
+                    if chosen is None:
                         continue
 
                     sinr_db, spec_eff, bs_id, need_hz = chosen
                     u.tn_sinr_db = sinr_db
                     u.spectral_efficiency = spec_eff
                     u.tn_eval_bs = f"BS_{bs_id}"
-                    reserved_hz[bs_id] += need_hz
+                    # CLAMP: without this a heavily oversubscribed cell keeps
+                    # accumulating reserved_hz past its own capacity, so its
+                    # "spare" goes negative and rule 2 can no longer rank cells
+                    # by remaining room.
+                    reserved_hz[bs_id] = min(
+                        bs_by_id[bs_id].total_bandwidth_hz,
+                        reserved_hz[bs_id] + need_hz)
                     bs_by_id[bs_id].attached_users.append(u)
+
+                if abs(hour_of_day - 20.0) < 0.01:
+                    _opts = [t[0] for t in pending]
+                    print(f"   [assoc] {len(pending):,} users with >=1 feasible "
+                          f"cell; median options {int(np.median(_opts)) if _opts else 0}; "
+                          f"{_n_full_fit:,} attached with room for FULL demand, "
+                          f"{_n_partial:,} to the emptiest reachable cell.",
+                          flush=True)
 
             # ==================================================
             # PHASE 2: MAC SCHEDULING

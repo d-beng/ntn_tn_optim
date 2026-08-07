@@ -390,6 +390,8 @@ def coordination_gap(hex_users, bss, log: bool = True):
             spare[j] -= take
 
     if log:
+        print(f"      [coord] sector wedge ENFORCED: a user may use only "
+              f"the ONE sector of each site that faces it", flush=True)
         print(f"      [coord] shortfall {total_short/1e3:,.1f} Gbps | "
               f"absorbable by in-range cells with spare spectrum: "
               f"{recovered/1e3:,.1f} Gbps "
@@ -402,6 +404,32 @@ def coordination_gap(hex_users, bss, log: bool = True):
 
 
 def _in_range(bs, lat, lon):
+    """Can this user ACTUALLY attach to this sector cell?
+
+    Distance alone is not enough. Every site carries 3 sectors at azimuths
+    30/150/270, each covering a 120-degree wedge and each holding its OWN
+    independent spectrum pool (W_t per sector -- that is what
+    bs_sector_utilisation.csv reports). full_pipeline._evaluate_attachment
+    enforces this with in_sector(); a user can reach exactly ONE sector per
+    site, the one facing it.
+
+    The earlier version of this function tested only
+        distance <= coverage_radius_km
+    so it counted ALL THREE sectors of every nearby site as reachable and
+    summed all three spare-spectrum pools as available to the user. That
+    inflated the coordination bound by up to 3x. It never affected a
+    placement decision -- this function is diagnostic only -- but it is the
+    number reported as "recoverable by steering", so it has to be right.
+    """
     dlat = (lat - bs.lat) * 111.0
     dlon = (lon - bs.lon) * 111.0 * math.cos(math.radians(bs.lat))
-    return math.hypot(dlat, dlon) <= float(bs.coverage_radius_km)
+    if math.hypot(dlat, dlon) > float(bs.coverage_radius_km):
+        return False
+    az = getattr(bs, "sector_azimuth_deg", None)
+    if az is None:
+        return True                      # omni cell: no wedge to test
+    try:
+        from hybrid_ntn_optimizer.link_budget.sector_antenna import in_sector
+        return bool(in_sector(bs.lat, bs.lon, float(az), lat, lon))
+    except Exception:
+        return True

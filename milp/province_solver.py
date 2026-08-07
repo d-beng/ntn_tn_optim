@@ -392,7 +392,17 @@ def main():
                   flush=True)
 
     # ---------------- final pass selection (MUST precede accounting) -------
-    final = results2 or results
+    #final = results2 or results
+    final, n1, n2 = {}, 0, 0
+    for hx in results:
+        s1 = results[hx]["summary"]
+        s2 = (results2.get(hx) or {}).get("summary") if results2 else None
+        if s2 is None or s1["own_served_pct"] > s2["own_served_pct"] + 1e-9:
+            final[hx] = results[hx]; n1 += 1
+        else:
+            final[hx] = results2[hx]; n2 += 1
+    print(f"\n  pass selection: {n1:,} hexes kept PASS 1, {n2:,} kept PASS 2",
+          flush=True)
 
     # ------------- SPARSE-HEX ACCOUNTING (full-region totals) --------------
     # Hexes under --min-users get no TN build, but their demand is real and
